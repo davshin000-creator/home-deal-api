@@ -29,6 +29,13 @@ class AnalyzeRequest(BaseModel):
     loan_term_years: int
 
 
+class FindDealsRequest(BaseModel):
+    city: str
+    state: str
+    max_price: int
+    limit: int = 5
+
+
 def calculate_monthly_mortgage(
     listing_price,
     down_payment_percent,
@@ -147,29 +154,13 @@ def generate_summary(status, gross_rent_yield, year_built, cash_flow):
     return summary
 
 
-@app.post("/analyze")
-def analyze_property(request: AnalyzeRequest):
-    address = request.address.strip()
-    listing_price = request.listing_price
-    down_payment_percent = request.down_payment_percent
-    interest_rate = request.interest_rate
-    loan_term_years = request.loan_term_years
-
-    if not address:
-        raise HTTPException(status_code=400, detail="Property address is required.")
-
-    if listing_price <= 0:
-        raise HTTPException(status_code=400, detail="Listing price must be greater than 0.")
-
-    if down_payment_percent < 0 or down_payment_percent >= 100:
-        raise HTTPException(status_code=400, detail="Down payment must be between 0 and 100.")
-
-    if interest_rate < 0:
-        raise HTTPException(status_code=400, detail="Interest rate cannot be negative.")
-
-    if loan_term_years <= 0:
-        raise HTTPException(status_code=400, detail="Loan term must be greater than 0.")
-
+def analyze_single_property(
+    address,
+    listing_price,
+    down_payment_percent=25,
+    interest_rate=6.5,
+    loan_term_years=30
+):
     value_response = requests.get(
         "https://api.rentcast.io/v1/avm/value",
         headers=headers,
@@ -273,4 +264,123 @@ def analyze_property(request: AnalyzeRequest):
         "monthly_insurance": round(monthly_insurance, 2),
         "monthly_maintenance": round(monthly_maintenance, 2),
         "estimated_monthly_cash_flow": round(monthly_cash_flow, 2)
+    }
+
+
+@app.post("/analyze")
+def analyze_property(request: AnalyzeRequest):
+    address = request.address.strip()
+
+    if not address:
+        raise HTTPException(status_code=400, detail="Property address is required.")
+
+    if request.listing_price <= 0:
+        raise HTTPException(status_code=400, detail="Listing price must be greater than 0.")
+
+    return analyze_single_property(
+        address=address,
+        listing_price=request.listing_price,
+        down_payment_percent=request.down_payment_percent,
+        interest_rate=request.interest_rate,
+        loan_term_years=request.loan_term_years
+    )
+
+
+@app.post("/find-deals")
+def find_deals(request: FindDealsRequest):
+    city = request.city.strip()
+    state = request.state.strip().upper()
+    max_price = request.max_price
+    limit = request.limit
+
+    if not city:
+        raise HTTPException(status_code=400, detail="City is required.")
+
+    if not state:
+        raise HTTPException(status_code=400, detail="State is required.")
+
+    if max_price <= 0:
+        raise HTTPException(status_code=400, detail="Max price must be greater than 0.")
+
+    if limit <= 0:
+        limit = 5
+
+    if limit > 10:
+        limit = 10
+
+    listings_response = requests.get(
+        "https://api.rentcast.io/v1/listings/sale",
+        headers=headers,
+        params={
+            "city": city,
+            "state": state,
+            "status": "Active",
+            "limit": 50
+        },
+        timeout=20
+    )
+
+    if listings_response.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Could not retrieve sale listings.",
+                "status_code": listings_response.status_code,
+                "response": listings_response.text
+            }
+        )
+
+    listings = listings_response.json()
+
+    deals = []
+
+    for listing in listings:
+        try:
+            address = listing.get("formattedAddress")
+            listing_price = listing.get("price")
+
+            if not address:
+                continue
+
+            if not listing_price:
+                continue
+
+            if listing_price > max_price:
+                continue
+
+            analysis = analyze_single_property(
+                address=address,
+                listing_price=listing_price,
+                down_payment_percent=25,
+                interest_rate=6.5,
+                loan_term_years=30
+            )
+
+            deals.append({
+                "address": analysis["address"],
+                "listing_price": analysis["listing_price"],
+                "fair_value": analysis["fair_value"],
+                "estimated_monthly_rent": analysis["estimated_monthly_rent"],
+                "discount_percent": analysis["discount_percent"],
+                "gross_rent_yield": analysis["gross_rent_yield"],
+                "deal_score": analysis["deal_score"],
+                "status": analysis["status"],
+                "estimated_monthly_cash_flow": analysis["estimated_monthly_cash_flow"]
+            })
+
+        except Exception:
+            continue
+
+    deals = sorted(
+        deals,
+        key=lambda item: item["deal_score"],
+        reverse=True
+    )
+
+    return {
+        "city": city,
+        "state": state,
+        "max_price": max_price,
+        "count": len(deals),
+        "deals": deals[:limit]
     }
