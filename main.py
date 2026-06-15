@@ -1,9 +1,10 @@
+import os
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-API_KEY = "77774519c38049f8b70e30782e264f42"
+API_KEY = os.getenv("RENTCAST_API_KEY")
 
 headers = {
     "X-Api-Key": API_KEY
@@ -13,7 +14,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
