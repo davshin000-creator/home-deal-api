@@ -27,9 +27,9 @@ app.add_middleware(
 class AnalyzeRequest(BaseModel):
     address: str
     listing_price: float
-    down_payment_percent: float
-    interest_rate: float
-    loan_term_years: int
+    down_payment_percent: float = 25
+    interest_rate: float = 6.5
+    loan_term_years: int = 30
 
 
 class FindDealsRequest(BaseModel):
@@ -37,17 +37,12 @@ class FindDealsRequest(BaseModel):
     state: str
     max_price: int
     limit: int = 5
+    is_pro: bool = False
 
 
-def calculate_monthly_mortgage(
-    listing_price,
-    down_payment_percent,
-    interest_rate,
-    loan_term_years
-):
+def calculate_monthly_mortgage(listing_price, down_payment_percent, interest_rate, loan_term_years):
     down_payment = listing_price * (down_payment_percent / 100)
     loan_amount = listing_price - down_payment
-
     monthly_rate = (interest_rate / 100) / 12
     total_months = loan_term_years * 12
 
@@ -55,12 +50,8 @@ def calculate_monthly_mortgage(
         monthly_payment = loan_amount / total_months
     else:
         monthly_payment = (
-            loan_amount
-            * monthly_rate
-            * (1 + monthly_rate) ** total_months
-        ) / (
-            (1 + monthly_rate) ** total_months - 1
-        )
+            loan_amount * monthly_rate * (1 + monthly_rate) ** total_months
+        ) / ((1 + monthly_rate) ** total_months - 1)
 
     return monthly_payment, loan_amount, down_payment
 
@@ -120,9 +111,74 @@ def calculate_deal_score(discount_percent, gross_rent_yield, year_built, cash_fl
         score -= 15
         reasons.append("Weak monthly cash flow (-15)")
 
+    return max(0, min(score, 100)), reasons
+
+
+def calculate_forecast_score(discount_percent, gross_rent_yield, deal_score, cash_flow, year_built):
+    score = 50
+    reasons = []
+
+    if discount_percent >= 10:
+        score += 18
+        reasons.append("Property appears significantly undervalued versus estimated fair value.")
+    elif discount_percent >= 5:
+        score += 12
+        reasons.append("Property appears moderately undervalued versus estimated fair value.")
+    elif discount_percent < -5:
+        score -= 12
+        reasons.append("Property appears overpriced versus estimated fair value.")
+
+    if gross_rent_yield >= 6:
+        score += 12
+        reasons.append("Strong rental yield supports investment demand.")
+    elif gross_rent_yield >= 4:
+        score += 7
+        reasons.append("Moderate rental yield supports stable investment potential.")
+    else:
+        score -= 6
+        reasons.append("Low rental yield may limit investor demand.")
+
+    if deal_score >= 80:
+        score += 12
+        reasons.append("High deal score indicates strong overall investment quality.")
+    elif deal_score >= 65:
+        score += 7
+        reasons.append("Good deal score indicates above-average investment quality.")
+    elif deal_score < 45:
+        score -= 8
+        reasons.append("Low deal score suggests weaker investment quality.")
+
+    if cash_flow >= 500:
+        score += 10
+        reasons.append("Strong positive cash flow improves holding potential.")
+    elif cash_flow >= 0:
+        score += 5
+        reasons.append("Positive cash flow improves holding stability.")
+    elif cash_flow < -500:
+        score -= 10
+        reasons.append("Weak cash flow may reduce investment attractiveness.")
+
+    if year_built >= 2015:
+        score += 5
+        reasons.append("Newer property may reduce maintenance risk.")
+    elif year_built < 1980:
+        score -= 5
+        reasons.append("Older property may carry higher repair risk.")
+
     score = max(0, min(score, 100))
 
-    return score, reasons
+    if score >= 80:
+        outlook = "Strong Growth Potential"
+    elif score >= 65:
+        outlook = "Growth Potential"
+    elif score >= 45:
+        outlook = "Stable Outlook"
+    elif score >= 25:
+        outlook = "Limited Growth"
+    else:
+        outlook = "Weak Outlook"
+
+    return score, outlook, reasons
 
 
 def generate_summary(status, gross_rent_yield, year_built, cash_flow):
@@ -157,13 +213,7 @@ def generate_summary(status, gross_rent_yield, year_built, cash_flow):
     return summary
 
 
-def analyze_single_property(
-    address,
-    listing_price,
-    down_payment_percent=25,
-    interest_rate=6.5,
-    loan_term_years=30
-):
+def analyze_single_property(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
     value_response = requests.get(
         "https://api.rentcast.io/v1/avm/value",
         headers=headers,
@@ -172,17 +222,14 @@ def analyze_single_property(
     )
 
     if value_response.status_code != 200:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not get fair value data for this address."
-        )
+        raise HTTPException(status_code=400, detail="Could not get fair value data for this address.")
 
     value_data = value_response.json()
 
-    fair_value = value_data["price"]
-    low_value = value_data["priceRangeLow"]
-    high_value = value_data["priceRangeHigh"]
-    year_built = value_data["subjectProperty"]["yearBuilt"]
+    fair_value = value_data.get("price")
+    low_value = value_data.get("priceRangeLow")
+    high_value = value_data.get("priceRangeHigh")
+    year_built = value_data.get("subjectProperty", {}).get("yearBuilt", 1990)
 
     rent_response = requests.get(
         "https://api.rentcast.io/v1/avm/rent/long-term",
@@ -192,14 +239,14 @@ def analyze_single_property(
     )
 
     if rent_response.status_code != 200:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not get rent estimate data for this address."
-        )
+        raise HTTPException(status_code=400, detail="Could not get rent estimate data for this address.")
 
     rent_data = rent_response.json()
+    monthly_rent = rent_data.get("rent")
 
-    monthly_rent = rent_data["rent"]
+    if not fair_value or not monthly_rent:
+        raise HTTPException(status_code=400, detail="Missing property value or rent data.")
+
     annual_rent = monthly_rent * 12
 
     monthly_mortgage, loan_amount, down_payment = calculate_monthly_mortgage(
@@ -209,11 +256,9 @@ def analyze_single_property(
         loan_term_years
     )
 
-    annual_property_tax = listing_price * 0.0125
-    monthly_property_tax = annual_property_tax / 12
-
-    monthly_insurance = listing_price * 0.0035 / 12
-    monthly_maintenance = listing_price * 0.01 / 12
+    monthly_property_tax = (listing_price * 0.0125) / 12
+    monthly_insurance = (listing_price * 0.0035) / 12
+    monthly_maintenance = (listing_price * 0.01) / 12
 
     monthly_cash_flow = (
         monthly_rent
@@ -233,41 +278,52 @@ def analyze_single_property(
     else:
         status = "FAIR PRICE"
 
-    score, reasons = calculate_deal_score(
+    deal_score, reasons = calculate_deal_score(
         discount_percent,
         gross_rent_yield,
         year_built,
         monthly_cash_flow
     )
 
-    summary = generate_summary(
-        status,
+    forecast_score, forecast_outlook, forecast_reasons = calculate_forecast_score(
+        discount_percent,
         gross_rent_yield,
-        year_built,
-        monthly_cash_flow
+        deal_score,
+        monthly_cash_flow,
+        year_built
     )
+
+    summary = generate_summary(status, gross_rent_yield, year_built, monthly_cash_flow)
 
     return {
         "address": address,
         "listing_price": round(listing_price, 2),
         "fair_value": round(fair_value, 2),
-        "fair_value_low": round(low_value, 2),
-        "fair_value_high": round(high_value, 2),
+        "fair_value_low": round(low_value or fair_value, 2),
+        "fair_value_high": round(high_value or fair_value, 2),
         "estimated_monthly_rent": round(monthly_rent, 2),
         "discount_percent": round(discount_percent, 2),
         "gross_rent_yield": round(gross_rent_yield, 2),
         "status": status,
-        "deal_score": score,
+        "deal_score": deal_score,
         "reasons": reasons,
         "summary": summary,
+        "forecast_score": forecast_score,
+        "forecast_outlook": forecast_outlook,
+        "forecast_reasons": forecast_reasons,
         "down_payment": round(down_payment, 2),
         "loan_amount": round(loan_amount, 2),
         "monthly_mortgage": round(monthly_mortgage, 2),
         "monthly_property_tax": round(monthly_property_tax, 2),
         "monthly_insurance": round(monthly_insurance, 2),
         "monthly_maintenance": round(monthly_maintenance, 2),
-        "estimated_monthly_cash_flow": round(monthly_cash_flow, 2)
+        "estimated_monthly_cash_flow": round(monthly_cash_flow, 2),
     }
+
+
+@app.get("/")
+def root():
+    return {"message": "Home Deal API is running"}
 
 
 @app.post("/analyze")
@@ -294,22 +350,15 @@ def find_deals(request: FindDealsRequest):
     city = request.city.strip()
     state = request.state.strip().upper()
     max_price = request.max_price
-    limit = request.limit
 
-    if not city:
-        raise HTTPException(status_code=400, detail="City is required.")
-
-    if not state:
-        raise HTTPException(status_code=400, detail="State is required.")
-
-    if max_price <= 0:
-        raise HTTPException(status_code=400, detail="Max price must be greater than 0.")
-
-    if limit <= 0:
-        limit = 5
-
-    if limit > 10:
-        limit = 10
+    if request.is_pro:
+        result_limit = min(request.limit, 50)
+        search_limit = 100
+        plan = "pro"
+    else:
+        result_limit = 5
+        search_limit = 50
+        plan = "free"
 
     listings_response = requests.get(
         "https://api.rentcast.io/v1/listings/sale",
@@ -318,23 +367,15 @@ def find_deals(request: FindDealsRequest):
             "city": city,
             "state": state,
             "status": "Active",
-            "limit": 50
+            "limit": search_limit
         },
         timeout=20
     )
 
     if listings_response.status_code != 200:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "Could not retrieve sale listings.",
-                "status_code": listings_response.status_code,
-                "response": listings_response.text
-            }
-        )
+        raise HTTPException(status_code=400, detail="Could not retrieve sale listings.")
 
     listings = listings_response.json()
-
     deals = []
 
     for listing in listings:
@@ -342,22 +383,13 @@ def find_deals(request: FindDealsRequest):
             address = listing.get("formattedAddress")
             listing_price = listing.get("price")
 
-            if not address:
-                continue
-
-            if not listing_price:
+            if not address or not listing_price:
                 continue
 
             if listing_price > max_price:
                 continue
 
-            analysis = analyze_single_property(
-                address=address,
-                listing_price=listing_price,
-                down_payment_percent=25,
-                interest_rate=6.5,
-                loan_term_years=30
-            )
+            analysis = analyze_single_property(address, listing_price)
 
             deals.append({
                 "address": analysis["address"],
@@ -367,6 +399,8 @@ def find_deals(request: FindDealsRequest):
                 "discount_percent": analysis["discount_percent"],
                 "gross_rent_yield": analysis["gross_rent_yield"],
                 "deal_score": analysis["deal_score"],
+                "forecast_score": analysis["forecast_score"],
+                "forecast_outlook": analysis["forecast_outlook"],
                 "status": analysis["status"],
                 "estimated_monthly_cash_flow": analysis["estimated_monthly_cash_flow"]
             })
@@ -374,16 +408,14 @@ def find_deals(request: FindDealsRequest):
         except Exception:
             continue
 
-    deals = sorted(
-        deals,
-        key=lambda item: item["deal_score"],
-        reverse=True
-    )
+    deals = sorted(deals, key=lambda item: item["deal_score"], reverse=True)
 
     return {
         "city": city,
         "state": state,
         "max_price": max_price,
-        "count": len(deals),
-        "deals": deals[:limit]
+        "plan": plan,
+        "result_limit": result_limit,
+        "total_analyzed": len(deals),
+        "deals": deals[:result_limit]
     }
