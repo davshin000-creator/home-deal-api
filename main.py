@@ -268,6 +268,15 @@ def calculate_appreciation_forecast(forecast_score, deal_score, neighborhood_sco
 
     return round(appreciation, 1), confidence
 
+
+def calculate_overall_score(deal_score, forecast_score, neighborhood_score):
+    return round(
+        deal_score * 0.4
+        + forecast_score * 0.35
+        + neighborhood_score * 0.25
+    )
+
+
 def generate_summary(status, gross_rent_yield, year_built, cash_flow):
     summary = ""
 
@@ -383,10 +392,16 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
     )
     
     expected_appreciation, confidence_score = calculate_appreciation_forecast(
-    forecast_score,
-    deal_score,
-    neighborhood_score,
-)
+        forecast_score,
+        deal_score,
+        neighborhood_score,
+    )
+
+    overall_score = calculate_overall_score(
+        deal_score,
+        forecast_score,
+        neighborhood_score,
+    )
     
     summary = generate_summary(status, gross_rent_yield, year_built, monthly_cash_flow)
 
@@ -411,6 +426,7 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         "neighborhood_reasons": neighborhood_reasons,
         "expected_appreciation": expected_appreciation,
         "confidence_score": confidence_score,
+        "overall_score": overall_score,
         "down_payment": round(down_payment, 2),
         "loan_amount": round(loan_amount, 2),
         "monthly_mortgage": round(monthly_mortgage, 2),
@@ -505,6 +521,7 @@ def find_deals(request: FindDealsRequest):
                 "neighborhood_grade": analysis["neighborhood_grade"],
                 "expected_appreciation": analysis["expected_appreciation"],
                 "confidence_score": analysis["confidence_score"],
+                "overall_score": analysis["overall_score"],
                 "status": analysis["status"],
                 "estimated_monthly_cash_flow": analysis["estimated_monthly_cash_flow"],
             })
@@ -512,7 +529,7 @@ def find_deals(request: FindDealsRequest):
         except Exception:
             continue
 
-    deals = sorted(deals, key=lambda item: item["deal_score"], reverse=True)
+    deals = sorted(deals, key=lambda item: item["overall_score"], reverse=True)
 
     return {
         "city": city,
