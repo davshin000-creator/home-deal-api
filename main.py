@@ -248,6 +248,25 @@ def calculate_neighborhood_score(gross_rent_yield, cash_flow, year_built, deal_s
 
     return score, grade, reasons
 
+def calculate_appreciation_forecast(forecast_score, deal_score, neighborhood_score):
+    if forecast_score >= 90:
+        appreciation = 10.0
+    elif forecast_score >= 80:
+        appreciation = 7.0
+    elif forecast_score >= 70:
+        appreciation = 5.0
+    elif forecast_score >= 60:
+        appreciation = 3.0
+    elif forecast_score >= 50:
+        appreciation = 1.0
+    elif forecast_score >= 40:
+        appreciation = -1.0
+    else:
+        appreciation = -3.5
+
+    confidence = round((forecast_score + deal_score + neighborhood_score) / 3)
+
+    return round(appreciation, 1), confidence
 
 def generate_summary(status, gross_rent_yield, year_built, cash_flow):
     summary = ""
@@ -362,7 +381,13 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         deal_score,
         forecast_score,
     )
-
+    
+    expected_appreciation, confidence_score = calculate_appreciation_forecast(
+    forecast_score,
+    deal_score,
+    neighborhood_score,
+)
+    
     summary = generate_summary(status, gross_rent_yield, year_built, monthly_cash_flow)
 
     return {
@@ -384,6 +409,8 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         "neighborhood_score": neighborhood_score,
         "neighborhood_grade": neighborhood_grade,
         "neighborhood_reasons": neighborhood_reasons,
+        "expected_appreciation": expected_appreciation,
+        "confidence_score": confidence_score,
         "down_payment": round(down_payment, 2),
         "loan_amount": round(loan_amount, 2),
         "monthly_mortgage": round(monthly_mortgage, 2),
@@ -476,6 +503,8 @@ def find_deals(request: FindDealsRequest):
                 "forecast_outlook": analysis["forecast_outlook"],
                 "neighborhood_score": analysis["neighborhood_score"],
                 "neighborhood_grade": analysis["neighborhood_grade"],
+                "expected_appreciation": analysis["expected_appreciation"],
+                "confidence_score": analysis["confidence_score"],
                 "status": analysis["status"],
                 "estimated_monthly_cash_flow": analysis["estimated_monthly_cash_flow"],
             })
