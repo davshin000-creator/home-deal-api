@@ -6,9 +6,7 @@ from pydantic import BaseModel
 
 API_KEY = os.getenv("RENTCAST_API_KEY")
 
-headers = {
-    "X-Api-Key": API_KEY
-}
+headers = {"X-Api-Key": API_KEY}
 
 app = FastAPI()
 
@@ -181,6 +179,76 @@ def calculate_forecast_score(discount_percent, gross_rent_yield, deal_score, cas
     return score, outlook, reasons
 
 
+def calculate_neighborhood_score(gross_rent_yield, cash_flow, year_built, deal_score, forecast_score):
+    score = 50
+    reasons = []
+
+    if gross_rent_yield >= 6:
+        score += 15
+        reasons.append("Strong rental yield suggests healthy rental demand.")
+    elif gross_rent_yield >= 4:
+        score += 10
+        reasons.append("Moderate rental yield suggests stable rental demand.")
+    else:
+        score -= 8
+        reasons.append("Low rental yield may indicate weaker rental demand.")
+
+    if cash_flow >= 500:
+        score += 15
+        reasons.append("Strong cash flow supports long-term holding strength.")
+    elif cash_flow >= 0:
+        score += 8
+        reasons.append("Positive cash flow supports investment stability.")
+    else:
+        score -= 10
+        reasons.append("Negative cash flow may create holding risk.")
+
+    if year_built >= 2015:
+        score += 12
+        reasons.append("Newer property may reduce repair and maintenance risk.")
+    elif year_built >= 2000:
+        score += 8
+        reasons.append("Relatively modern property condition.")
+    elif year_built < 1980:
+        score -= 8
+        reasons.append("Older property may require more maintenance review.")
+
+    if deal_score >= 80:
+        score += 10
+        reasons.append("High deal score supports a strong local investment profile.")
+    elif deal_score >= 65:
+        score += 6
+        reasons.append("Good deal score supports a positive investment profile.")
+    elif deal_score < 45:
+        score -= 8
+        reasons.append("Lower deal score weakens the investment profile.")
+
+    if forecast_score >= 80:
+        score += 8
+        reasons.append("Strong appreciation outlook supports neighborhood potential.")
+    elif forecast_score >= 65:
+        score += 5
+        reasons.append("Positive appreciation outlook supports neighborhood potential.")
+    elif forecast_score < 45:
+        score -= 6
+        reasons.append("Weak appreciation outlook may limit neighborhood upside.")
+
+    score = max(0, min(score, 100))
+
+    if score >= 85:
+        grade = "Excellent Neighborhood Profile"
+    elif score >= 70:
+        grade = "Strong Neighborhood Profile"
+    elif score >= 55:
+        grade = "Stable Neighborhood Profile"
+    elif score >= 40:
+        grade = "Mixed Neighborhood Profile"
+    else:
+        grade = "Weak Neighborhood Profile"
+
+    return score, grade, reasons
+
+
 def generate_summary(status, gross_rent_yield, year_built, cash_flow):
     summary = ""
 
@@ -218,7 +286,7 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         "https://api.rentcast.io/v1/avm/value",
         headers=headers,
         params={"address": address},
-        timeout=15
+        timeout=15,
     )
 
     if value_response.status_code != 200:
@@ -235,7 +303,7 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         "https://api.rentcast.io/v1/avm/rent/long-term",
         headers=headers,
         params={"address": address},
-        timeout=15
+        timeout=15,
     )
 
     if rent_response.status_code != 200:
@@ -253,20 +321,14 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         listing_price,
         down_payment_percent,
         interest_rate,
-        loan_term_years
+        loan_term_years,
     )
 
     monthly_property_tax = (listing_price * 0.0125) / 12
     monthly_insurance = (listing_price * 0.0035) / 12
     monthly_maintenance = (listing_price * 0.01) / 12
 
-    monthly_cash_flow = (
-        monthly_rent
-        - monthly_mortgage
-        - monthly_property_tax
-        - monthly_insurance
-        - monthly_maintenance
-    )
+    monthly_cash_flow = monthly_rent - monthly_mortgage - monthly_property_tax - monthly_insurance - monthly_maintenance
 
     discount_percent = ((fair_value - listing_price) / fair_value) * 100
     gross_rent_yield = (annual_rent / listing_price) * 100
@@ -282,7 +344,7 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         discount_percent,
         gross_rent_yield,
         year_built,
-        monthly_cash_flow
+        monthly_cash_flow,
     )
 
     forecast_score, forecast_outlook, forecast_reasons = calculate_forecast_score(
@@ -290,7 +352,15 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         gross_rent_yield,
         deal_score,
         monthly_cash_flow,
-        year_built
+        year_built,
+    )
+
+    neighborhood_score, neighborhood_grade, neighborhood_reasons = calculate_neighborhood_score(
+        gross_rent_yield,
+        monthly_cash_flow,
+        year_built,
+        deal_score,
+        forecast_score,
     )
 
     summary = generate_summary(status, gross_rent_yield, year_built, monthly_cash_flow)
@@ -311,6 +381,9 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         "forecast_score": forecast_score,
         "forecast_outlook": forecast_outlook,
         "forecast_reasons": forecast_reasons,
+        "neighborhood_score": neighborhood_score,
+        "neighborhood_grade": neighborhood_grade,
+        "neighborhood_reasons": neighborhood_reasons,
         "down_payment": round(down_payment, 2),
         "loan_amount": round(loan_amount, 2),
         "monthly_mortgage": round(monthly_mortgage, 2),
@@ -341,7 +414,7 @@ def analyze_property(request: AnalyzeRequest):
         listing_price=request.listing_price,
         down_payment_percent=request.down_payment_percent,
         interest_rate=request.interest_rate,
-        loan_term_years=request.loan_term_years
+        loan_term_years=request.loan_term_years,
     )
 
 
@@ -367,9 +440,9 @@ def find_deals(request: FindDealsRequest):
             "city": city,
             "state": state,
             "status": "Active",
-            "limit": search_limit
+            "limit": search_limit,
         },
-        timeout=20
+        timeout=20,
     )
 
     if listings_response.status_code != 200:
@@ -401,8 +474,10 @@ def find_deals(request: FindDealsRequest):
                 "deal_score": analysis["deal_score"],
                 "forecast_score": analysis["forecast_score"],
                 "forecast_outlook": analysis["forecast_outlook"],
+                "neighborhood_score": analysis["neighborhood_score"],
+                "neighborhood_grade": analysis["neighborhood_grade"],
                 "status": analysis["status"],
-                "estimated_monthly_cash_flow": analysis["estimated_monthly_cash_flow"]
+                "estimated_monthly_cash_flow": analysis["estimated_monthly_cash_flow"],
             })
 
         except Exception:
@@ -417,5 +492,5 @@ def find_deals(request: FindDealsRequest):
         "plan": plan,
         "result_limit": result_limit,
         "total_analyzed": len(deals),
-        "deals": deals[:result_limit]
+        "deals": deals[:result_limit],
     }
