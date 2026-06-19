@@ -5,6 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 API_KEY = os.getenv("RENTCAST_API_KEY")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+ALERT_FROM_EMAIL = os.getenv("ALERT_FROM_EMAIL", "Nestrova Alerts <onboarding@resend.dev>")
+NESTROVA_APP_URL = os.getenv("NESTROVA_APP_URL", "https://home-deal-ai.vercel.app")
 
 headers = {"X-Api-Key": API_KEY}
 
@@ -36,6 +41,10 @@ class FindDealsRequest(BaseModel):
     max_price: int
     limit: int = 5
     is_pro: bool = False
+
+
+class RunAlertsRequest(BaseModel):
+    max_alerts: int = 25
 
 
 def calculate_monthly_mortgage(listing_price, down_payment_percent, interest_rate, loan_term_years):
@@ -437,6 +446,127 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
     }
 
 
+
+def get_supabase_headers():
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Supabase environment variables are missing.",
+        )
+
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def get_active_alerts(limit=25):
+    supabase_headers = get_supabase_headers()
+
+    response = requests.get(
+        f"{SUPABASE_URL}/rest/v1/deal_alerts",
+        headers=supabase_headers,
+        params={
+            "select": "*",
+            "is_active": "eq.true",
+            "limit": limit,
+            "order": "created_at.desc",
+        },
+        timeout=20,
+    )
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not load alerts: {response.text}",
+        )
+
+    return response.json()
+
+
+def send_deal_alert_email(alert, deals):
+    if not RESEND_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="RESEND_API_KEY is missing.",
+        )
+
+    email = alert.get("email")
+    if not email:
+        return {
+            "sent": False,
+            "reason": "Alert has no email address.",
+        }
+
+    city = alert.get("city", "")
+    state = alert.get("state", "")
+    best_deal = deals[0]
+
+    subject = f"New high-score deal found in {city}, {state}"
+
+    appreciation = best_deal.get("expected_appreciation", 0)
+    appreciation_text = f"+{appreciation}%" if appreciation and appreciation > 0 else f"{appreciation}%"
+
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; color: #111827;">
+      <h1 style="font-size: 26px; margin-bottom: 8px;">New high-score deal found</h1>
+      <p style="font-size: 16px; color: #4b5563;">
+        Nestrova found a property that matches your alert for <strong>{city}, {state}</strong>.
+      </p>
+
+      <div style="border: 1px solid #e5e7eb; border-radius: 16px; padding: 20px; margin-top: 20px;">
+        <p style="font-size: 13px; color: #6b7280; margin: 0 0 8px;">Top Match</p>
+        <h2 style="font-size: 22px; margin: 0 0 12px;">{best_deal.get("address", "Unknown address")}</h2>
+
+        <p style="font-size: 16px; margin: 6px 0;"><strong>Overall Score:</strong> {best_deal.get("overall_score", "N/A")}/100</p>
+        <p style="font-size: 16px; margin: 6px 0;"><strong>Deal Score:</strong> {best_deal.get("deal_score", "N/A")}/100</p>
+        <p style="font-size: 16px; margin: 6px 0;"><strong>Expected Appreciation:</strong> {appreciation_text}</p>
+        <p style="font-size: 16px; margin: 6px 0;"><strong>Cash Flow:</strong> ${round(best_deal.get("estimated_monthly_cash_flow", 0)):,}/mo</p>
+        <p style="font-size: 16px; margin: 6px 0;"><strong>Price:</strong> ${round(best_deal.get("listing_price", 0)):,}</p>
+      </div>
+
+      <p style="margin-top: 24px;">
+        <a href="{NESTROVA_APP_URL}" style="display: inline-block; background: #111827; color: white; padding: 12px 18px; border-radius: 10px; text-decoration: none; font-weight: bold;">
+          View on Nestrova
+        </a>
+      </p>
+
+      <p style="font-size: 12px; color: #6b7280; margin-top: 28px;">
+        This alert is for informational purposes only and is not financial advice.
+      </p>
+    </div>
+    """
+
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "from": ALERT_FROM_EMAIL,
+            "to": [email],
+            "subject": subject,
+            "html": html,
+        },
+        timeout=20,
+    )
+
+    if response.status_code >= 400:
+        return {
+            "sent": False,
+            "email": email,
+            "reason": response.text,
+        }
+
+    return {
+        "sent": True,
+        "email": email,
+        "resend_response": response.json(),
+    }
+
+
 @app.get("/")
 def root():
     return {"message": "Home Deal API is running"}
@@ -539,4 +669,73 @@ def find_deals(request: FindDealsRequest):
         "result_limit": result_limit,
         "total_analyzed": len(deals),
         "deals": deals[:result_limit],
+    }
+
+
+@app.post("/run-alerts")
+def run_alerts(request: RunAlertsRequest):
+    alerts = get_active_alerts(limit=request.max_alerts)
+
+    results = []
+
+    for alert in alerts:
+        try:
+            city = str(alert.get("city", "")).strip()
+            state = str(alert.get("state", "")).strip().upper()
+            max_price = int(alert.get("max_price") or 0)
+            min_score = int(alert.get("min_score") or 0)
+
+            if not city or not state or max_price <= 0:
+                results.append({
+                    "alert_id": alert.get("id"),
+                    "sent": False,
+                    "reason": "Invalid alert data.",
+                })
+                continue
+
+            search_request = FindDealsRequest(
+                city=city,
+                state=state,
+                max_price=max_price,
+                limit=10,
+                is_pro=True,
+            )
+
+            search_result = find_deals(search_request)
+            matching_deals = [
+                deal for deal in search_result["deals"]
+                if int(deal.get("overall_score", 0)) >= min_score
+            ]
+
+            if not matching_deals:
+                results.append({
+                    "alert_id": alert.get("id"),
+                    "city": city,
+                    "state": state,
+                    "sent": False,
+                    "reason": "No matching deals found.",
+                })
+                continue
+
+            email_result = send_deal_alert_email(alert, matching_deals)
+
+            results.append({
+                "alert_id": alert.get("id"),
+                "city": city,
+                "state": state,
+                "matches": len(matching_deals),
+                **email_result,
+            })
+
+        except Exception as error:
+            results.append({
+                "alert_id": alert.get("id"),
+                "sent": False,
+                "reason": str(error),
+            })
+
+    return {
+        "alerts_checked": len(alerts),
+        "emails_sent": len([item for item in results if item.get("sent")]),
+        "results": results,
     }
