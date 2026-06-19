@@ -598,12 +598,14 @@ def find_deals(request: FindDealsRequest):
     max_price = request.max_price
 
     if request.is_pro:
-        result_limit = min(request.limit, 50)
-        search_limit = 100
+        result_limit = min(request.limit, 10)
+        search_limit = 25
+        max_full_analyses = 10
         plan = "pro"
     else:
-        result_limit = 5
-        search_limit = 50
+        result_limit = 3
+        search_limit = 10
+        max_full_analyses = 3
         plan = "free"
 
     listings_response = requests.get(
@@ -624,6 +626,7 @@ def find_deals(request: FindDealsRequest):
     listings = listings_response.json()
     deals = []
 
+    analyed_count = 0
     for listing in listings:
         try:
             address = listing.get("formattedAddress")
@@ -636,6 +639,7 @@ def find_deals(request: FindDealsRequest):
                 continue
 
             analysis = analyze_single_property(address, listing_price)
+            analyze_count += 1
 
             deals.append({
                 "address": analysis["address"],
@@ -669,6 +673,7 @@ def find_deals(request: FindDealsRequest):
         "result_limit": result_limit,
         "total_analyzed": len(deals),
         "deals": deals[:result_limit],
+        "max_full_analyses" : max_full_anlayses,
     }
 
 
