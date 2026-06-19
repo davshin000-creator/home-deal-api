@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime, timezone
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,11 @@ SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 ALERT_FROM_EMAIL = os.getenv("ALERT_FROM_EMAIL", "Nestrova Alerts <onboarding@resend.dev>")
 NESTROVA_APP_URL = os.getenv("NESTROVA_APP_URL", "https://home-deal-ai.vercel.app")
+
+FREE_ANALYZE_MONTHLY_LIMIT = int(os.getenv("FREE_ANALYZE_MONTHLY_LIMIT", "5"))
+FREE_FIND_DEALS_MONTHLY_LIMIT = int(os.getenv("FREE_FIND_DEALS_MONTHLY_LIMIT", "1"))
+PRO_ANALYZE_MONTHLY_LIMIT = int(os.getenv("PRO_ANALYZE_MONTHLY_LIMIT", "50"))
+PRO_FIND_DEALS_MONTHLY_LIMIT = int(os.getenv("PRO_FIND_DEALS_MONTHLY_LIMIT", "10"))
 
 headers = {"X-Api-Key": API_KEY}
 
@@ -34,6 +40,8 @@ class AnalyzeRequest(BaseModel):
     down_payment_percent: float = 25
     interest_rate: float = 6.5
     loan_term_years: int = 30
+    user_id: str | None = None
+    is_pro: bool = False
 
 
 class FindDealsRequest(BaseModel):
@@ -42,6 +50,7 @@ class FindDealsRequest(BaseModel):
     max_price: int
     limit: int = 5
     is_pro: bool = False
+    user_id: str | None = None
 
 
 class RunAlertsRequest(BaseModel):
@@ -671,6 +680,158 @@ def send_deal_alert_email(alert, deals):
     }
 
 
+def get_month_key():
+    now = datetime.now(timezone.utc)
+    return f"{now.year}-{str(now.month).zfill(2)}"
+
+
+def get_usage_limit(action, is_pro):
+    if action == "analyze":
+        return PRO_ANALYZE_MONTHLY_LIMIT if is_pro else FREE_ANALYZE_MONTHLY_LIMIT
+
+    if action == "find_deals":
+        return PRO_FIND_DEALS_MONTHLY_LIMIT if is_pro else FREE_FIND_DEALS_MONTHLY_LIMIT
+
+    return 0
+
+
+def get_usage_counts(user_id):
+    if not user_id:
+        return {
+            "analyze_count": 0,
+            "find_deals_count": 0,
+            "month_key": get_month_key(),
+        }
+
+    supabase_headers = get_supabase_headers()
+    month_key = get_month_key()
+
+    response = requests.get(
+        f"{SUPABASE_URL}/rest/v1/usage_limits",
+        headers=supabase_headers,
+        params={
+            "user_id": f"eq.{user_id}",
+            "month_key": f"eq.{month_key}",
+            "select": "*",
+            "limit": "1",
+        },
+        timeout=10,
+    )
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not load usage limits: {response.text}",
+        )
+
+    rows = response.json()
+    if not rows:
+        return {
+            "analyze_count": 0,
+            "find_deals_count": 0,
+            "month_key": month_key,
+        }
+
+    row = rows[0]
+    return {
+        "analyze_count": int(row.get("analyze_count") or 0),
+        "find_deals_count": int(row.get("find_deals_count") or 0),
+        "month_key": month_key,
+    }
+
+
+def enforce_usage_limit(user_id, action, is_pro):
+    # Backward-compatible safety:
+    # If user_id is not provided, do not break old frontend/docs tests.
+    # The frontend should send Clerk user.id next so this becomes fully enforced per user.
+    if not user_id:
+        return {
+            "allowed": True,
+            "tracked": False,
+            "reason": "No user_id provided; usage tracking skipped.",
+        }
+
+    counts = get_usage_counts(user_id)
+    limit = get_usage_limit(action, is_pro)
+
+    current_count = (
+        counts["analyze_count"]
+        if action == "analyze"
+        else counts["find_deals_count"]
+    )
+
+    if current_count >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Monthly {action.replace('_', ' ')} limit reached. "
+                f"Limit: {limit}. Upgrade to Pro to continue."
+            ),
+        )
+
+    return {
+        "allowed": True,
+        "tracked": True,
+        "month_key": counts["month_key"],
+        "current_count": current_count,
+        "limit": limit,
+        "remaining_before_request": max(limit - current_count, 0),
+    }
+
+
+def increment_usage(user_id, action, is_pro):
+    if not user_id:
+        return None
+
+    counts = get_usage_counts(user_id)
+    month_key = counts["month_key"]
+
+    next_analyze_count = counts["analyze_count"]
+    next_find_deals_count = counts["find_deals_count"]
+
+    if action == "analyze":
+        next_analyze_count += 1
+        limit = get_usage_limit("analyze", is_pro)
+        current = next_analyze_count
+    else:
+        next_find_deals_count += 1
+        limit = get_usage_limit("find_deals", is_pro)
+        current = next_find_deals_count
+
+    payload = {
+        "user_id": user_id,
+        "month_key": month_key,
+        "analyze_count": next_analyze_count,
+        "find_deals_count": next_find_deals_count,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    response = requests.post(
+        f"{SUPABASE_URL}/rest/v1/usage_limits",
+        headers={
+            **get_supabase_headers(),
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        },
+        json=payload,
+        timeout=10,
+    )
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not update usage limits: {response.text}",
+        )
+
+    return {
+        "month_key": month_key,
+        "action": action,
+        "count": current,
+        "limit": limit,
+        "remaining": max(limit - current, 0),
+        "is_pro": is_pro,
+    }
+
+
 @app.get("/")
 def root():
     return {"message": "Home Deal API is running"}
@@ -686,7 +847,13 @@ def analyze_property(request: AnalyzeRequest):
     if request.listing_price <= 0:
         raise HTTPException(status_code=400, detail="Listing price must be greater than 0.")
 
-    return analyze_single_property(
+    enforce_usage_limit(
+        user_id=request.user_id,
+        action="analyze",
+        is_pro=request.is_pro,
+    )
+
+    result = analyze_single_property(
         address=address,
         listing_price=request.listing_price,
         down_payment_percent=request.down_payment_percent,
@@ -694,12 +861,27 @@ def analyze_property(request: AnalyzeRequest):
         loan_term_years=request.loan_term_years,
     )
 
+    result = dict(result)
+    result["usage"] = increment_usage(
+        user_id=request.user_id,
+        action="analyze",
+        is_pro=request.is_pro,
+    )
+
+    return result
+
 
 @app.post("/find-deals")
 def find_deals(request: FindDealsRequest):
     city = request.city.strip()
     state = request.state.strip().upper()
     max_price = request.max_price
+
+    enforce_usage_limit(
+        user_id=request.user_id,
+        action="find_deals",
+        is_pro=request.is_pro,
+    )
 
     if request.is_pro:
         # Cost protection: Pro can see more results, but we still limit expensive full analyses.
@@ -775,6 +957,12 @@ def find_deals(request: FindDealsRequest):
 
     deals = sorted(deals, key=lambda item: item["overall_score"], reverse=True)
 
+    usage = increment_usage(
+        user_id=request.user_id,
+        action="find_deals",
+        is_pro=request.is_pro,
+    )
+
     return {
         "city": city,
         "state": state,
@@ -784,6 +972,7 @@ def find_deals(request: FindDealsRequest):
         "search_limit": search_limit,
         "max_full_analyses": max_full_analyses,
         "total_analyzed": len(deals),
+        "usage": usage,
         "deals": deals[:result_limit],
     }
 
