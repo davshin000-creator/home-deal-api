@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,7 +7,7 @@ from pydantic import BaseModel
 
 API_KEY = os.getenv("RENTCAST_API_KEY")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 ALERT_FROM_EMAIL = os.getenv("ALERT_FROM_EMAIL", "Nestrova Alerts <onboarding@resend.dev>")
 NESTROVA_APP_URL = os.getenv("NESTROVA_APP_URL", "https://home-deal-ai.vercel.app")
@@ -45,6 +46,85 @@ class FindDealsRequest(BaseModel):
 
 class RunAlertsRequest(BaseModel):
     max_alerts: int = 25
+
+
+# -----------------------------
+# Cost protection + cache helpers
+# -----------------------------
+
+def normalize_address(address):
+    return re.sub(r"\s+", " ", address.strip().lower())
+
+
+def make_cache_key(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
+    normalized_address = normalize_address(address)
+    return (
+        f"{normalized_address}|"
+        f"price:{round(float(listing_price), 2)}|"
+        f"down:{round(float(down_payment_percent), 2)}|"
+        f"rate:{round(float(interest_rate), 3)}|"
+        f"term:{int(loan_term_years)}"
+    )
+
+
+def get_cached_property(cache_key):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return None
+
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/property_cache",
+            headers=get_supabase_headers(),
+            params={
+                "cache_key": f"eq.{cache_key}",
+                "select": "result",
+                "limit": "1",
+            },
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        rows = response.json()
+        if not rows:
+            return None
+
+        result = rows[0].get("result")
+        if isinstance(result, dict):
+            result["cache_status"] = "hit"
+        return result
+
+    except Exception:
+        return None
+
+
+def save_cached_property(cache_key, address, listing_price, result):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+
+    try:
+        result_to_store = dict(result)
+        result_to_store["cache_status"] = "stored"
+
+        payload = {
+            "cache_key": cache_key,
+            "address": address,
+            "listing_price": listing_price,
+            "result": result_to_store,
+        }
+
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/property_cache",
+            headers={
+                **get_supabase_headers(),
+                "Prefer": "resolution=merge-duplicates,return=minimal",
+            },
+            json=payload,
+            timeout=10,
+        )
+    except Exception:
+        return
 
 
 def calculate_monthly_mortgage(listing_price, down_payment_percent, interest_rate, loan_term_years):
@@ -318,7 +398,7 @@ def generate_summary(status, gross_rent_yield, year_built, cash_flow):
     return summary
 
 
-def analyze_single_property(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
+def analyze_single_property_uncached(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
     value_response = requests.get(
         "https://api.rentcast.io/v1/avm/value",
         headers=headers,
@@ -443,8 +523,32 @@ def analyze_single_property(address, listing_price, down_payment_percent=25, int
         "monthly_insurance": round(monthly_insurance, 2),
         "monthly_maintenance": round(monthly_maintenance, 2),
         "estimated_monthly_cash_flow": round(monthly_cash_flow, 2),
+        "cache_status": "miss",
     }
 
+
+def analyze_single_property(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
+    cache_key = make_cache_key(
+        address,
+        listing_price,
+        down_payment_percent,
+        interest_rate,
+        loan_term_years,
+    )
+
+    cached_result = get_cached_property(cache_key)
+    if cached_result:
+        return cached_result
+
+    result = analyze_single_property_uncached(
+        address,
+        listing_price,
+        down_payment_percent,
+        interest_rate,
+        loan_term_years,
+    )
+    save_cached_property(cache_key, address, listing_price, result)
+    return result
 
 
 def get_supabase_headers():
@@ -598,11 +702,13 @@ def find_deals(request: FindDealsRequest):
     max_price = request.max_price
 
     if request.is_pro:
+        # Cost protection: Pro can see more results, but we still limit expensive full analyses.
         result_limit = min(request.limit, 10)
         search_limit = 25
         max_full_analyses = 10
         plan = "pro"
     else:
+        # Cost protection: Free users only trigger a small number of RentCast full analyses.
         result_limit = 3
         search_limit = 10
         max_full_analyses = 3
@@ -625,10 +731,13 @@ def find_deals(request: FindDealsRequest):
 
     listings = listings_response.json()
     deals = []
+    analyzed_count = 0
 
-    analyed_count = 0
     for listing in listings:
         try:
+            if analyzed_count >= max_full_analyses:
+                break
+
             address = listing.get("formattedAddress")
             listing_price = listing.get("price")
 
@@ -639,7 +748,7 @@ def find_deals(request: FindDealsRequest):
                 continue
 
             analysis = analyze_single_property(address, listing_price)
-            analyze_count += 1
+            analyzed_count += 1
 
             deals.append({
                 "address": analysis["address"],
@@ -658,6 +767,7 @@ def find_deals(request: FindDealsRequest):
                 "overall_score": analysis["overall_score"],
                 "status": analysis["status"],
                 "estimated_monthly_cash_flow": analysis["estimated_monthly_cash_flow"],
+                "cache_status": analysis.get("cache_status", "unknown"),
             })
 
         except Exception:
@@ -671,9 +781,10 @@ def find_deals(request: FindDealsRequest):
         "max_price": max_price,
         "plan": plan,
         "result_limit": result_limit,
+        "search_limit": search_limit,
+        "max_full_analyses": max_full_analyses,
         "total_analyzed": len(deals),
         "deals": deals[:result_limit],
-        "max_full_analyses" : max_full_anlayses,
     }
 
 
@@ -698,12 +809,14 @@ def run_alerts(request: RunAlertsRequest):
                 })
                 continue
 
+            # Cost protection: scheduled alerts use the smaller analysis limit.
+            # Upgrade this to is_pro=True only after paid plans are active.
             search_request = FindDealsRequest(
                 city=city,
                 state=state,
                 max_price=max_price,
-                limit=10,
-                is_pro=True,
+                limit=3,
+                is_pro=False,
             )
 
             search_result = find_deals(search_request)
