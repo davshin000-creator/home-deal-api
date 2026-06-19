@@ -812,6 +812,9 @@ def increment_usage(user_id, action, is_pro):
             **get_supabase_headers(),
             "Prefer": "resolution=merge-duplicates,return=minimal",
         },
+        params={
+            "on_conflict": "user_id,month_key",
+        },
         json=payload,
         timeout=10,
     )
