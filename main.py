@@ -887,7 +887,12 @@ def analyze_property(
 
 
 @app.post("/find-deals")
-def find_deals(request: FindDealsRequest):
+def find_deals(
+    request: FindDealsRequest,
+    x_nestrova_internal_key: str | None = Header(default=None),
+):
+    verify_internal_request(x_nestrova_internal_key)
+
     city = request.city.strip()
     state = request.state.strip().upper()
     max_price = request.max_price
