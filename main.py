@@ -2,11 +2,12 @@ import os
 import re
 from datetime import datetime, timezone
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 API_KEY = os.getenv("RENTCAST_API_KEY")
+NESTROVA_INTERNAL_API_KEY = os.getenv("NESTROVA_INTERNAL_API_KEY")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -679,6 +680,13 @@ def send_deal_alert_email(alert, deals):
         "resend_response": response.json(),
     }
 
+def verify_internal_request(internal_key: str | None):
+    if not NESTROVA_INTERNAL_API_KEY:
+        return
+
+    if internal_key != NESTROVA_INTERNAL_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid internal API key.")
+
 
 def get_month_key():
     now = datetime.now(timezone.utc)
@@ -841,7 +849,11 @@ def root():
 
 
 @app.post("/analyze")
-def analyze_property(request: AnalyzeRequest):
+def analyze_property(
+    request: AnalyzeRequest,
+    x_nestrova_internal_key: str | None = Header(default=None),
+):
+    verify_internal_request(x_nestrova_internal_key)
     address = request.address.strip()
 
     if not address:
