@@ -749,7 +749,15 @@ def analyze_single_property_uncached(address, listing_price, down_payment_percen
     fair_value = value_data.get("price")
     low_value = value_data.get("priceRangeLow")
     high_value = value_data.get("priceRangeHigh")
-    year_built = value_data.get("subjectProperty", {}).get("yearBuilt", 1990)
+
+    subject_property = (
+        value_data.get("subjectProperty") or {}
+    )
+
+    year_built = subject_property.get(
+        "yearBuilt",
+        1990,
+    )
 
     rent_response = requests.get(
         "https://api.rentcast.io/v1/avm/rent/long-term",
@@ -849,6 +857,13 @@ def analyze_single_property_uncached(address, listing_price, down_payment_percen
         "fair_value": round(fair_value, 2),
         "fair_value_low": round(low_value or fair_value, 2),
         "fair_value_high": round(high_value or fair_value, 2),
+        "property_type": subject_property.get("propertyType"),
+        "bedrooms": subject_property.get("bedrooms"),
+        "bathrooms": subject_property.get("bathrooms"),
+        "square_footage": subject_property.get("squareFootage"),
+        "year_built": subject_property.get("yearBuilt"),
+        "latitude": subject_property.get("latitude"),
+        "longitude": subject_property.get("longitude"),
         "estimated_monthly_rent": round(monthly_rent, 2),
         "discount_percent": round(discount_percent, 2),
         "gross_rent_yield": round(gross_rent_yield, 2),
