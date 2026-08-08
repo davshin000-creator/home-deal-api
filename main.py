@@ -347,6 +347,212 @@ def calculate_neighborhood_score(gross_rent_yield, cash_flow, year_built, deal_s
 
     return score, grade, reasons
 
+def build_ranked_comparables(value_data, limit=5):
+    subject = value_data.get("subjectProperty") or {}
+    raw_comparables = value_data.get("comparables") or []
+
+    subject_sqft = float(
+        subject.get("squareFootage") or 0
+    )
+    subject_year = int(
+        subject.get("yearBuilt") or 0
+    )
+    subject_beds = float(
+        subject.get("bedrooms") or 0
+    )
+    subject_baths = float(
+        subject.get("bathrooms") or 0
+    )
+    subject_type = str(
+        subject.get("propertyType") or ""
+    ).strip().lower()
+
+    ranked = []
+
+    for comp in raw_comparables:
+        try:
+            correlation = float(
+                comp.get("correlation") or 0
+            )
+            distance = float(
+                comp.get("distance") or 999
+            )
+
+            comp_sqft = float(
+                comp.get("squareFootage") or 0
+            )
+            comp_year = int(
+                comp.get("yearBuilt") or 0
+            )
+            comp_beds = float(
+                comp.get("bedrooms") or 0
+            )
+            comp_baths = float(
+                comp.get("bathrooms") or 0
+            )
+            comp_type = str(
+                comp.get("propertyType") or ""
+            ).strip().lower()
+
+            if subject_sqft > 0 and comp_sqft > 0:
+                sqft_similarity = max(
+                    0.0,
+                    1.0
+                    - abs(
+                        comp_sqft - subject_sqft
+                    )
+                    / subject_sqft,
+                )
+            else:
+                sqft_similarity = 0.5
+
+            if subject_year > 0 and comp_year > 0:
+                year_similarity = max(
+                    0.0,
+                    1.0
+                    - abs(
+                        comp_year - subject_year
+                    )
+                    / 25.0,
+                )
+            else:
+                year_similarity = 0.5
+
+            bed_similarity = max(
+                0.0,
+                1.0
+                - min(
+                    abs(comp_beds - subject_beds),
+                    2.0,
+                )
+                / 2.0,
+            )
+
+            bath_similarity = max(
+                0.0,
+                1.0
+                - min(
+                    abs(comp_baths - subject_baths),
+                    2.0,
+                )
+                / 2.0,
+            )
+
+            room_similarity = (
+                bed_similarity
+                + bath_similarity
+            ) / 2.0
+
+            distance_similarity = max(
+                0.0,
+                1.0
+                - min(distance, 2.0) / 2.0,
+            )
+
+            type_similarity = (
+                1.0
+                if (
+                    subject_type
+                    and comp_type
+                    and subject_type == comp_type
+                )
+                else 0.6
+            )
+
+            similarity_score = round(
+                (
+                    correlation * 0.35
+                    + sqft_similarity * 0.25
+                    + year_similarity * 0.12
+                    + room_similarity * 0.10
+                    + distance_similarity * 0.10
+                    + type_similarity * 0.08
+                )
+                * 100
+            )
+
+            ranked.append(
+                {
+                    "id": comp.get("id"),
+                    "address": comp.get(
+                        "formattedAddress"
+                    ),
+                    "city": comp.get("city"),
+                    "state": comp.get("state"),
+                    "zip_code": comp.get(
+                        "zipCode"
+                    ),
+                    "property_type": comp.get(
+                        "propertyType"
+                    ),
+                    "bedrooms": comp.get(
+                        "bedrooms"
+                    ),
+                    "bathrooms": comp.get(
+                        "bathrooms"
+                    ),
+                    "square_footage": comp.get(
+                        "squareFootage"
+                    ),
+                    "lot_size": comp.get(
+                        "lotSize"
+                    ),
+                    "year_built": comp.get(
+                        "yearBuilt"
+                    ),
+                    "status": comp.get("status"),
+                    "price": comp.get("price"),
+                    "listing_type": comp.get(
+                        "listingType"
+                    ),
+                    "listed_date": comp.get(
+                        "listedDate"
+                    ),
+                    "removed_date": comp.get(
+                        "removedDate"
+                    ),
+                    "days_on_market": comp.get(
+                        "daysOnMarket"
+                    ),
+                    "distance_miles": comp.get(
+                        "distance"
+                    ),
+                    "days_old": comp.get(
+                        "daysOld"
+                    ),
+                    "rentcast_correlation": comp.get(
+                        "correlation"
+                    ),
+                    "similarity_score": max(
+                        0,
+                        min(100, similarity_score),
+                    ),
+                }
+            )
+
+        except (TypeError, ValueError):
+            continue
+
+    ranked.sort(
+        key=lambda item: (
+            item["similarity_score"],
+            float(
+                item.get(
+                    "rentcast_correlation"
+                )
+                or 0
+            ),
+            -float(
+                item.get("distance_miles")
+                or 999
+            ),
+        ),
+        reverse=True,
+    )
+
+    return ranked[: max(1, int(limit))]
+
+
 def calculate_appreciation_forecast(forecast_score, deal_score, neighborhood_score):
     if forecast_score >= 90:
         appreciation = 10.0
@@ -407,6 +613,120 @@ def generate_summary(status, gross_rent_yield, year_built, cash_flow):
 
     return summary
 
+def generate_home_report(
+    status,
+    discount_percent,
+    monthly_cash_flow,
+    gross_rent_yield,
+    overall_score,
+):
+    if overall_score >= 80:
+        recommendation = "BUY"
+        label = "Strong Buy"
+    elif overall_score >= 65:
+        recommendation = "CONSIDER_BUYING"
+        label = "Consider Buying"
+    elif overall_score >= 45:
+        recommendation = "NEGOTIATE"
+        label = "Negotiate"
+    else:
+        recommendation = "PASS"
+        label = "Pass"
+
+    strengths = []
+
+    if status == "UNDERVALUED":
+        strengths.append("The asking price appears below estimated market value.")
+
+    if gross_rent_yield >= 4:
+        strengths.append("The property has healthy rental potential.")
+
+    if monthly_cash_flow >= 0:
+        strengths.append("Estimated monthly ownership performs reasonably well.")
+
+    risks = []
+
+    if status == "OVERPRICED":
+        risks.append("The asking price appears higher than estimated market value.")
+
+    if monthly_cash_flow < 0:
+        risks.append("Estimated monthly ownership cost exceeds rental income.")
+
+    if gross_rent_yield < 3:
+        risks.append("Rental demand may be weaker than average.")
+
+    if recommendation == "BUY":
+        thesis = (
+            "This home appears attractively priced with a healthy overall outlook."
+        )
+
+    elif recommendation == "CONSIDER_BUYING":
+        thesis = (
+            "This home looks like a solid purchase, but you should review financing and monthly costs."
+        )
+
+    elif recommendation == "NEGOTIATE":
+        thesis = (
+            "The property has potential, but negotiating a lower purchase price is recommended."
+        )
+
+    else:
+        thesis = (
+            "There are enough concerns that waiting for a better opportunity may be the safer choice."
+        )
+
+    return {
+        "recommended_action": recommendation,
+        "recommendation_label": label,
+        "investment_thesis": thesis,
+        "key_strengths": strengths,
+        "key_risks": risks,
+    }
+
+def generate_negotiation_strategy(
+    listing_price,
+    fair_value,
+    discount_percent,
+):
+    """
+    AI Negotiation Recommendation
+    """
+
+    if discount_percent >= 5:
+        suggested_offer = listing_price * 0.98
+        max_offer = listing_price
+
+        strategy = (
+            "The property already appears undervalued. "
+            "Start slightly below asking price and avoid over-negotiating."
+        )
+
+    elif discount_percent >= 0:
+        suggested_offer = listing_price * 0.96
+        max_offer = fair_value
+
+        strategy = (
+            "Begin below asking price. "
+            "Increase gradually if comparable sales support the value."
+        )
+
+    else:
+        suggested_offer = fair_value * 0.96
+        max_offer = fair_value
+
+        strategy = (
+            "Current asking price appears high. "
+            "Only proceed if the seller is willing to negotiate."
+        )
+
+    estimated_savings = max(0, listing_price - suggested_offer)
+
+    return {
+        "suggested_offer": round(suggested_offer),
+        "maximum_offer": round(max_offer),
+        "estimated_savings": round(estimated_savings),
+        "strategy": strategy,
+    }
 
 def analyze_single_property_uncached(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
     value_response = requests.get(
@@ -420,6 +740,11 @@ def analyze_single_property_uncached(address, listing_price, down_payment_percen
         raise HTTPException(status_code=400, detail="Could not get fair value data for this address.")
 
     value_data = value_response.json()
+
+    comparables = build_ranked_comparables(
+        value_data,
+        limit=5,
+    )
 
     fair_value = value_data.get("price")
     low_value = value_data.get("priceRangeLow")
@@ -504,6 +829,20 @@ def analyze_single_property_uncached(address, listing_price, down_payment_percen
     
     summary = generate_summary(status, gross_rent_yield, year_built, monthly_cash_flow)
 
+    home_report = generate_home_report(
+    status,
+    discount_percent,
+    monthly_cash_flow,
+    gross_rent_yield,
+    overall_score,
+    )
+
+    negotiation = generate_negotiation_strategy(
+    listing_price,
+    fair_value,
+    discount_percent,
+    )
+
     return {
         "address": address,
         "listing_price": round(listing_price, 2),
@@ -533,7 +872,11 @@ def analyze_single_property_uncached(address, listing_price, down_payment_percen
         "monthly_insurance": round(monthly_insurance, 2),
         "monthly_maintenance": round(monthly_maintenance, 2),
         "estimated_monthly_cash_flow": round(monthly_cash_flow, 2),
+        "comparables": comparables,
+        "comparable_count": len(comparables),
         "cache_status": "miss",
+        "home_report": home_report,
+        "negotiation": negotiation,
     }
 
 
