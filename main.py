@@ -687,46 +687,236 @@ def generate_negotiation_strategy(
     listing_price,
     fair_value,
     discount_percent,
+    comparables=None,
 ):
     """
-    AI Negotiation Recommendation
+    Nestrova Negotiation AI.
+
+    Uses the subject listing price, AI fair value,
+    and ranked comparable prices to estimate an
+    opening offer, target price, and walk-away price.
     """
 
-    if discount_percent >= 5:
-        suggested_offer = listing_price * 0.98
-        max_offer = listing_price
+    comparable_prices = []
 
-        strategy = (
-            "The property already appears undervalued. "
-            "Start slightly below asking price and avoid over-negotiating."
+    for comp in comparables or []:
+        try:
+            price = float(comp.get("price") or 0)
+
+            if price > 0:
+                comparable_prices.append(price)
+
+        except (TypeError, ValueError):
+            continue
+
+    comparable_prices.sort()
+
+    comparable_median = None
+
+    if comparable_prices:
+        midpoint = len(comparable_prices) // 2
+
+        if len(comparable_prices) % 2 == 1:
+            comparable_median = comparable_prices[
+                midpoint
+            ]
+        else:
+            comparable_median = (
+                comparable_prices[midpoint - 1]
+                + comparable_prices[midpoint]
+            ) / 2
+
+    best_match_price = None
+
+    if comparables:
+        try:
+            best_match_price = float(
+                comparables[0].get("price") or 0
+            )
+
+            if best_match_price <= 0:
+                best_match_price = None
+
+        except (TypeError, ValueError, IndexError):
+            best_match_price = None
+
+    reference_values = [
+        float(fair_value),
+    ]
+
+    if comparable_median:
+        reference_values.append(
+            comparable_median
+        )
+
+    if best_match_price:
+        reference_values.append(
+            best_match_price
+        )
+
+    market_reference = sum(
+        reference_values
+    ) / len(reference_values)
+
+    strategy_reasons = []
+
+    if discount_percent >= 5:
+        opening_offer = listing_price * 0.975
+        target_price = min(
+            listing_price * 0.99,
+            market_reference,
+        )
+
+        walk_away_price = min(
+            fair_value * 1.01,
+            market_reference * 1.02,
+        )
+
+        strategy_reasons.append(
+            "The asking price already appears below AI fair value."
+        )
+        strategy_reasons.append(
+            "Use a modest opening discount to avoid losing a strong-value property."
         )
 
     elif discount_percent >= 0:
-        suggested_offer = listing_price * 0.96
-        max_offer = fair_value
+        opening_offer = listing_price * 0.955
 
-        strategy = (
-            "Begin below asking price. "
-            "Increase gradually if comparable sales support the value."
+        target_price = min(
+            listing_price * 0.985,
+            market_reference,
+        )
+
+        walk_away_price = min(
+            fair_value,
+            market_reference * 1.01,
+        )
+
+        strategy_reasons.append(
+            "The property appears close to fair value, leaving room for measured negotiation."
+        )
+        strategy_reasons.append(
+            "Comparable pricing should be used to support incremental counteroffers."
         )
 
     else:
-        suggested_offer = fair_value * 0.96
-        max_offer = fair_value
-
-        strategy = (
-            "Current asking price appears high. "
-            "Only proceed if the seller is willing to negotiate."
+        opening_offer = min(
+            listing_price * 0.94,
+            fair_value * 0.96,
+            market_reference * 0.96,
         )
 
-    estimated_savings = max(0, listing_price - suggested_offer)
+        target_price = min(
+            fair_value * 0.985,
+            market_reference * 0.985,
+            listing_price * 0.97,
+        )
+
+        walk_away_price = min(
+            fair_value,
+            market_reference,
+        )
+
+        strategy_reasons.append(
+            "The current asking price appears above AI fair value."
+        )
+        strategy_reasons.append(
+            "The offer should remain disciplined unless inspection or market evidence justifies a premium."
+        )
+
+    if comparable_median:
+        if listing_price < comparable_median:
+            strategy_reasons.append(
+                "The subject listing is below the median price of the strongest comparables."
+            )
+        elif listing_price > comparable_median:
+            strategy_reasons.append(
+                "The subject listing is above the median price of the strongest comparables."
+            )
+        else:
+            strategy_reasons.append(
+                "The subject listing is aligned with the comparable median."
+            )
+
+    if best_match_price:
+        if listing_price < best_match_price:
+            strategy_reasons.append(
+                "The best-match comparable is priced above the subject property."
+            )
+        elif listing_price > best_match_price:
+            strategy_reasons.append(
+                "The best-match comparable is priced below the subject property."
+            )
+
+    opening_offer = max(
+        0,
+        min(opening_offer, listing_price),
+    )
+
+    target_price = max(
+        opening_offer,
+        min(target_price, listing_price),
+    )
+
+    walk_away_price = max(
+        target_price,
+        walk_away_price,
+    )
+
+    estimated_savings = max(
+        0,
+        listing_price - target_price,
+    )
+
+    if walk_away_price < listing_price:
+        walk_away_price = min(
+            listing_price,
+            max(
+                walk_away_price,
+                target_price,
+            ),
+        )
+
+    strategy = " ".join(
+        strategy_reasons[:3]
+    )
 
     return {
-        "suggested_offer": round(suggested_offer),
-        "maximum_offer": round(max_offer),
-        "estimated_savings": round(estimated_savings),
+        "suggested_offer": round(
+            opening_offer
+        ),
+        "recommended_target": round(
+            target_price
+        ),
+        "maximum_offer": round(
+            walk_away_price
+        ),
+        "walk_away_price": round(
+            walk_away_price
+        ),
+        "estimated_savings": round(
+            estimated_savings
+        ),
+        "comparable_median": (
+            round(comparable_median)
+            if comparable_median
+            else None
+        ),
+        "best_match_price": (
+            round(best_match_price)
+            if best_match_price
+            else None
+        ),
+        "market_reference": round(
+            market_reference
+        ),
+        "comparable_count": len(
+            comparable_prices
+        ),
         "strategy": strategy,
+        "strategy_reasons": strategy_reasons,
     }
+
 
 def analyze_single_property_uncached(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
     value_response = requests.get(
@@ -846,9 +1036,10 @@ def analyze_single_property_uncached(address, listing_price, down_payment_percen
     )
 
     negotiation = generate_negotiation_strategy(
-    listing_price,
-    fair_value,
-    discount_percent,
+        listing_price,
+        fair_value,
+        discount_percent,
+        comparables=comparables,
     )
 
     return {
