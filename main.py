@@ -1594,13 +1594,13 @@ def find_deals(
         # Cost protection: Pro can see more results, but we still limit expensive full analyses.
         result_limit = min(request.limit, 10)
         search_limit = 25
-        max_full_analyses = 10
+        max_new_analyses = 4
         plan = "pro"
     else:
         # Cost protection: Free users only trigger a small number of RentCast full analyses.
         result_limit = 3
         search_limit = 10
-        max_full_analyses = 3
+        max_new_analyses = 2
         plan = "free"
 
     listings_response = requests.get(
