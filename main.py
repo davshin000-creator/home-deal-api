@@ -62,9 +62,93 @@ class RunAlertsRequest(BaseModel):
 # Cost protection + cache helpers
 # -----------------------------
 
+def rank_listing_candidate(listing, max_price):
+    price = float(listing.get("price") or 0)
+
+    if price <= 0:
+        return -1000
+
+    if price > float(max_price):
+        return -1000
+
+    score = 0.0
+
+    property_type = str(
+        listing.get("propertyType") or ""
+    ).strip().lower()
+
+    bedrooms = listing.get("bedrooms")
+    bathrooms = listing.get("bathrooms")
+    square_footage = listing.get("squareFootage")
+
+    # Prefer typical residential inventory first.
+    if (
+        "single" in property_type
+        or "detached" in property_type
+    ):
+        score += 25
+
+    elif "condo" in property_type:
+        score += 22
+
+    elif "town" in property_type:
+        score += 21
+
+    elif (
+        "multi" in property_type
+        or "duplex" in property_type
+        or "triplex" in property_type
+        or "fourplex" in property_type
+    ):
+        score += 20
+
+    elif (
+        "manufactured" in property_type
+        or "mobile" in property_type
+    ):
+        score += 12
+
+    elif "land" in property_type:
+        score -= 30
+
+    elif property_type:
+        score += 5
+
+    # Reward listings with enough metadata for better comparison.
+    if bedrooms is not None:
+        score += 6
+
+    if bathrooms is not None:
+        score += 6
+
+    try:
+        sqft = float(square_footage or 0)
+        if sqft > 0:
+            score += 8
+    except (TypeError, ValueError):
+        pass
+
+    # Slight preference for listings comfortably inside budget.
+    budget_ratio = price / max(float(max_price), 1.0)
+
+    if budget_ratio <= 0.85:
+        score += 6
+    elif budget_ratio <= 0.95:
+        score += 3
+
+    return round(score, 2)
+
 def normalize_address(address):
     return re.sub(r"\s+", " ", address.strip().lower())
 
+
+def make_property_data_cache_key(address):
+    normalized_address = normalize_address(address)
+
+    return (
+        f"property_data|"
+        f"{normalized_address}"
+    )
 
 def make_cache_key(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
     normalized_address = normalize_address(address)
@@ -76,6 +160,71 @@ def make_cache_key(address, listing_price, down_payment_percent=25, interest_rat
         f"term:{int(loan_term_years)}"
     )
 
+
+def get_property_market_data(address):
+    cache_key = make_property_data_cache_key(
+        address,
+    )
+
+    cached = get_cached_property(
+        cache_key,
+    )
+
+    if cached:
+        return {
+            "value_data":
+                cached.get("value_data") or {},
+            "rent_data":
+                cached.get("rent_data") or {},
+            "cache_status": "hit",
+        }
+
+    value_response = requests.get(
+        "https://api.rentcast.io/v1/avm/value",
+        headers=headers,
+        params={"address": address},
+        timeout=15,
+    )
+
+    if value_response.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail=
+                "Could not get fair value data for this address.",
+        )
+
+    value_data = value_response.json()
+
+    rent_response = requests.get(
+        "https://api.rentcast.io/v1/avm/rent/long-term",
+        headers=headers,
+        params={"address": address},
+        timeout=15,
+    )
+
+    if rent_response.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail=
+                "Could not get rent estimate data for this address.",
+        )
+
+    rent_data = rent_response.json()
+
+    payload = {
+        "value_data": value_data,
+        "rent_data": rent_data,
+        "cache_status": "miss",
+    }
+
+    save_cached_property(
+        cache_key,
+        address,
+        0,
+        payload,
+    )
+
+    return payload
 
 def get_cached_property(cache_key):
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
@@ -919,17 +1068,17 @@ def generate_negotiation_strategy(
 
 
 def analyze_single_property_uncached(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
-    value_response = requests.get(
-        "https://api.rentcast.io/v1/avm/value",
-        headers=headers,
-        params={"address": address},
-        timeout=15,
+    market_data = get_property_market_data(
+        address,
     )
 
-    if value_response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Could not get fair value data for this address.")
+    value_data = (
+        market_data.get("value_data") or {}
+    )
 
-    value_data = value_response.json()
+    rent_data = (
+        market_data.get("rent_data") or {}
+    )
 
     comparables = build_ranked_comparables(
         value_data,
@@ -949,17 +1098,6 @@ def analyze_single_property_uncached(address, listing_price, down_payment_percen
         1990,
     )
 
-    rent_response = requests.get(
-        "https://api.rentcast.io/v1/avm/rent/long-term",
-        headers=headers,
-        params={"address": address},
-        timeout=15,
-    )
-
-    if rent_response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Could not get rent estimate data for this address.")
-
-    rent_data = rent_response.json()
     monthly_rent = rent_data.get("rent")
 
     if not fair_value or not monthly_rent:
@@ -1456,13 +1594,13 @@ def find_deals(
         # Cost protection: Pro can see more results, but we still limit expensive full analyses.
         result_limit = min(request.limit, 10)
         search_limit = 25
-        max_full_analyses = 10
+        max_new_analyses = 4
         plan = "pro"
     else:
         # Cost protection: Free users only trigger a small number of RentCast full analyses.
         result_limit = 3
         search_limit = 10
-        max_full_analyses = 3
+        max_new_analyses = 2
         plan = "free"
 
     listings_response = requests.get(
@@ -1481,14 +1619,41 @@ def find_deals(
         raise HTTPException(status_code=400, detail="Could not retrieve sale listings.")
 
     listings = listings_response.json()
+
+    eligible_listings = []
+
+    for listing in listings:
+        score = rank_listing_candidate(
+            listing,
+            max_price,
+        )
+
+        if score <= -1000:
+            continue
+
+        eligible_listings.append(
+            {
+                "listing": listing,
+                "pre_filter_score": score,
+            }
+        )
+
+    eligible_listings.sort(
+        key=lambda item: item["pre_filter_score"],
+        reverse=True,
+    )
+
+    listings = [
+        item["listing"]
+        for item in eligible_listings
+    ]
+
     deals = []
-    analyzed_count = 0
+    new_analysis_count = 0
+    cache_hit_count = 0
 
     for listing in listings:
         try:
-            if analyzed_count >= max_full_analyses:
-                break
-
             address = listing.get("formattedAddress")
             listing_price = listing.get("price")
 
@@ -1498,8 +1663,38 @@ def find_deals(
             if listing_price > max_price:
                 continue
 
-            analysis = analyze_single_property(address, listing_price)
-            analyzed_count += 1
+            cache_key = make_cache_key(
+                address,
+                listing_price,
+            )
+
+            analysis = get_cached_property(
+                cache_key,
+            )
+
+            if analysis:
+                cache_hit_count += 1
+
+            else:
+                if (
+                    new_analysis_count >=
+                    max_new_analyses
+                ):
+                    continue
+
+                analysis = analyze_single_property_uncached(
+                    address,
+                    listing_price,
+                )
+
+                save_cached_property(
+                    cache_key,
+                    address,
+                    listing_price,
+                    analysis,
+                )
+
+                new_analysis_count += 1
 
             deals.append({
                 "address": analysis["address"],
@@ -1544,7 +1739,9 @@ def find_deals(
         "plan": plan,
         "result_limit": result_limit,
         "search_limit": search_limit,
-        "max_full_analyses": max_full_analyses,
+        "max_new_analyses": max_new_analyses,
+        "new_analysis_count": new_analysis_count,
+        "cache_hit_count": cache_hit_count,
         "total_analyzed": len(deals),
         "usage": usage,
         "deals": deals[:result_limit],
