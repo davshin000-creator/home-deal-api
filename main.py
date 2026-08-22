@@ -142,6 +142,14 @@ def normalize_address(address):
     return re.sub(r"\s+", " ", address.strip().lower())
 
 
+def make_property_data_cache_key(address):
+    normalized_address = normalize_address(address)
+
+    return (
+        f"property_data|"
+        f"{normalized_address}"
+    )
+
 def make_cache_key(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
     normalized_address = normalize_address(address)
     return (
@@ -152,6 +160,71 @@ def make_cache_key(address, listing_price, down_payment_percent=25, interest_rat
         f"term:{int(loan_term_years)}"
     )
 
+
+def get_property_market_data(address):
+    cache_key = make_property_data_cache_key(
+        address,
+    )
+
+    cached = get_cached_property(
+        cache_key,
+    )
+
+    if cached:
+        return {
+            "value_data":
+                cached.get("value_data") or {},
+            "rent_data":
+                cached.get("rent_data") or {},
+            "cache_status": "hit",
+        }
+
+    value_response = requests.get(
+        "https://api.rentcast.io/v1/avm/value",
+        headers=headers,
+        params={"address": address},
+        timeout=15,
+    )
+
+    if value_response.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail=
+                "Could not get fair value data for this address.",
+        )
+
+    value_data = value_response.json()
+
+    rent_response = requests.get(
+        "https://api.rentcast.io/v1/avm/rent/long-term",
+        headers=headers,
+        params={"address": address},
+        timeout=15,
+    )
+
+    if rent_response.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail=
+                "Could not get rent estimate data for this address.",
+        )
+
+    rent_data = rent_response.json()
+
+    payload = {
+        "value_data": value_data,
+        "rent_data": rent_data,
+        "cache_status": "miss",
+    }
+
+    save_cached_property(
+        cache_key,
+        address,
+        0,
+        payload,
+    )
+
+    return payload
 
 def get_cached_property(cache_key):
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
@@ -995,17 +1068,17 @@ def generate_negotiation_strategy(
 
 
 def analyze_single_property_uncached(address, listing_price, down_payment_percent=25, interest_rate=6.5, loan_term_years=30):
-    value_response = requests.get(
-        "https://api.rentcast.io/v1/avm/value",
-        headers=headers,
-        params={"address": address},
-        timeout=15,
+    market_data = get_property_market_data(
+        address,
     )
 
-    if value_response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Could not get fair value data for this address.")
+    value_data = (
+        market_data.get("value_data") or {}
+    )
 
-    value_data = value_response.json()
+    rent_data = (
+        market_data.get("rent_data") or {}
+    )
 
     comparables = build_ranked_comparables(
         value_data,
@@ -1025,17 +1098,6 @@ def analyze_single_property_uncached(address, listing_price, down_payment_percen
         1990,
     )
 
-    rent_response = requests.get(
-        "https://api.rentcast.io/v1/avm/rent/long-term",
-        headers=headers,
-        params={"address": address},
-        timeout=15,
-    )
-
-    if rent_response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Could not get rent estimate data for this address.")
-
-    rent_data = rent_response.json()
     monthly_rent = rent_data.get("rent")
 
     if not fair_value or not monthly_rent:
