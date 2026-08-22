@@ -161,6 +161,136 @@ def make_cache_key(address, listing_price, down_payment_percent=25, interest_rat
     )
 
 
+def make_find_deals_cache_key(
+    city,
+    state,
+    max_price,
+    plan,
+):
+    normalized_city = re.sub(
+        r"\s+",
+        " ",
+        str(city or "").strip().lower(),
+    )
+
+    normalized_state = (
+        str(state or "")
+        .strip()
+        .upper()
+    )
+
+    normalized_plan = (
+        str(plan or "free")
+        .strip()
+        .lower()
+    )
+
+    return (
+        f"find_deals|"
+        f"{normalized_city}|"
+        f"{normalized_state}|"
+        f"{int(float(max_price))}|"
+        f"{normalized_plan}"
+    )
+
+
+def get_cached_find_deals(
+    user_id,
+    search_key,
+):
+    if (
+        not user_id
+        or not SUPABASE_URL
+        or not SUPABASE_SERVICE_ROLE_KEY
+    ):
+        return None
+
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/property_search_cache",
+            headers=get_supabase_headers(),
+            params={
+                "user_id": f"eq.{user_id}",
+                "search_key": f"eq.{search_key}",
+                "select": "result",
+                "limit": "1",
+            },
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        rows = response.json()
+
+        if not rows:
+            return None
+
+        result = rows[0].get("result")
+
+        if not isinstance(result, dict):
+            return None
+
+        result = dict(result)
+        result["search_cache_status"] = "hit"
+        result["usage_charged"] = False
+
+        return result
+
+    except Exception:
+        return None
+
+
+def save_cached_find_deals(
+    user_id,
+    search_key,
+    city,
+    state,
+    max_price,
+    plan,
+    result,
+):
+    if (
+        not user_id
+        or not SUPABASE_URL
+        or not SUPABASE_SERVICE_ROLE_KEY
+    ):
+        return
+
+    try:
+        result_to_store = dict(result)
+        result_to_store["search_cache_status"] = "stored"
+
+        payload = {
+            "user_id": user_id,
+            "search_key": search_key,
+            "city": city,
+            "state": state,
+            "max_price": max_price,
+            "plan": plan,
+            "result": result_to_store,
+            "updated_at":
+                datetime.now(timezone.utc).isoformat(),
+        }
+
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/property_search_cache",
+            headers={
+                **get_supabase_headers(),
+                "Prefer":
+                    "resolution=merge-duplicates,return=minimal",
+            },
+            params={
+                "on_conflict":
+                    "user_id,search_key",
+            },
+            json=payload,
+            timeout=10,
+        )
+
+    except Exception:
+        return
+
 def get_property_market_data(address):
     cache_key = make_property_data_cache_key(
         address,
@@ -1584,6 +1714,27 @@ def find_deals(
     state = request.state.strip().upper()
     max_price = request.max_price
 
+    plan = (
+        "pro"
+        if request.is_pro
+        else "free"
+    )
+
+    search_key = make_find_deals_cache_key(
+        city,
+        state,
+        max_price,
+        plan,
+    )
+
+    cached_search = get_cached_find_deals(
+        request.user_id,
+        search_key,
+    )
+
+    if cached_search:
+        return cached_search
+
     enforce_usage_limit(
         user_id=request.user_id,
         action="find_deals",
@@ -1732,7 +1883,7 @@ def find_deals(
         is_pro=request.is_pro,
     )
 
-    return {
+    response_payload = {
         "city": city,
         "state": state,
         "max_price": max_price,
@@ -1745,7 +1896,21 @@ def find_deals(
         "total_analyzed": len(deals),
         "usage": usage,
         "deals": deals[:result_limit],
+        "search_cache_status": "miss",
+        "usage_charged": True,
     }
+
+    save_cached_find_deals(
+        request.user_id,
+        search_key,
+        city,
+        state,
+        max_price,
+        plan,
+        response_payload,
+    )
+
+    return response_payload
 
 
 @app.post("/run-alerts")
