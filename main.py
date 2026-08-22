@@ -62,6 +62,82 @@ class RunAlertsRequest(BaseModel):
 # Cost protection + cache helpers
 # -----------------------------
 
+def rank_listing_candidate(listing, max_price):
+    price = float(listing.get("price") or 0)
+
+    if price <= 0:
+        return -1000
+
+    if price > float(max_price):
+        return -1000
+
+    score = 0.0
+
+    property_type = str(
+        listing.get("propertyType") or ""
+    ).strip().lower()
+
+    bedrooms = listing.get("bedrooms")
+    bathrooms = listing.get("bathrooms")
+    square_footage = listing.get("squareFootage")
+
+    # Prefer typical residential inventory first.
+    if (
+        "single" in property_type
+        or "detached" in property_type
+    ):
+        score += 25
+
+    elif "condo" in property_type:
+        score += 22
+
+    elif "town" in property_type:
+        score += 21
+
+    elif (
+        "multi" in property_type
+        or "duplex" in property_type
+        or "triplex" in property_type
+        or "fourplex" in property_type
+    ):
+        score += 20
+
+    elif (
+        "manufactured" in property_type
+        or "mobile" in property_type
+    ):
+        score += 12
+
+    elif "land" in property_type:
+        score -= 30
+
+    elif property_type:
+        score += 5
+
+    # Reward listings with enough metadata for better comparison.
+    if bedrooms is not None:
+        score += 6
+
+    if bathrooms is not None:
+        score += 6
+
+    try:
+        sqft = float(square_footage or 0)
+        if sqft > 0:
+            score += 8
+    except (TypeError, ValueError):
+        pass
+
+    # Slight preference for listings comfortably inside budget.
+    budget_ratio = price / max(float(max_price), 1.0)
+
+    if budget_ratio <= 0.85:
+        score += 6
+    elif budget_ratio <= 0.95:
+        score += 3
+
+    return round(score, 2)
+
 def normalize_address(address):
     return re.sub(r"\s+", " ", address.strip().lower())
 
@@ -1481,14 +1557,41 @@ def find_deals(
         raise HTTPException(status_code=400, detail="Could not retrieve sale listings.")
 
     listings = listings_response.json()
+
+    eligible_listings = []
+
+    for listing in listings:
+        score = rank_listing_candidate(
+            listing,
+            max_price,
+        )
+
+        if score <= -1000:
+            continue
+
+        eligible_listings.append(
+            {
+                "listing": listing,
+                "pre_filter_score": score,
+            }
+        )
+
+    eligible_listings.sort(
+        key=lambda item: item["pre_filter_score"],
+        reverse=True,
+    )
+
+    listings = [
+        item["listing"]
+        for item in eligible_listings
+    ]
+
     deals = []
-    analyzed_count = 0
+    new_analysis_count = 0
+    cache_hit_count = 0
 
     for listing in listings:
         try:
-            if analyzed_count >= max_full_analyses:
-                break
-
             address = listing.get("formattedAddress")
             listing_price = listing.get("price")
 
@@ -1498,8 +1601,38 @@ def find_deals(
             if listing_price > max_price:
                 continue
 
-            analysis = analyze_single_property(address, listing_price)
-            analyzed_count += 1
+            cache_key = make_cache_key(
+                address,
+                listing_price,
+            )
+
+            analysis = get_cached_property(
+                cache_key,
+            )
+
+            if analysis:
+                cache_hit_count += 1
+
+            else:
+                if (
+                    new_analysis_count >=
+                    max_new_analyses
+                ):
+                    continue
+
+                analysis = analyze_single_property_uncached(
+                    address,
+                    listing_price,
+                )
+
+                save_cached_property(
+                    cache_key,
+                    address,
+                    listing_price,
+                    analysis,
+                )
+
+                new_analysis_count += 1
 
             deals.append({
                 "address": analysis["address"],
@@ -1544,7 +1677,9 @@ def find_deals(
         "plan": plan,
         "result_limit": result_limit,
         "search_limit": search_limit,
-        "max_full_analyses": max_full_analyses,
+        "max_new_analyses": max_new_analyses,
+        "new_analysis_count": new_analysis_count,
+        "cache_hit_count": cache_hit_count,
         "total_analyzed": len(deals),
         "usage": usage,
         "deals": deals[:result_limit],
