@@ -1504,6 +1504,11 @@ def find_deals(
             deals.append({
                 "address": analysis["address"],
                 "listing_price": analysis["listing_price"],
+                "property_type": analysis.get("property_type"),
+                "bedrooms": analysis.get("bedrooms"),
+                "bathrooms": analysis.get("bathrooms"),
+                "square_footage": analysis.get("square_footage"),
+                "year_built": analysis.get("year_built"),
                 "fair_value": analysis["fair_value"],
                 "estimated_monthly_rent": analysis["estimated_monthly_rent"],
                 "discount_percent": analysis["discount_percent"],
