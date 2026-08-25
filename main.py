@@ -1750,7 +1750,7 @@ def find_deals(
 ):
     verify_internal_request(x_nestrova_internal_key)
 
-    city = request.city.strip()
+    city = request.city.strip().title()
     state = request.state.strip().upper()
     max_price = request.max_price
 
