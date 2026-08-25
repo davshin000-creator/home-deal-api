@@ -1,5 +1,6 @@
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 import re
 from datetime import datetime, timezone
 import requests
@@ -1879,6 +1880,35 @@ def find_deals(
     deals = []
     new_analysis_count = 0
     cache_hit_count = 0
+    analysis_candidates = []
+
+    def build_deal_payload(analysis):
+        return {
+            "address": analysis["address"],
+            "listing_price": analysis["listing_price"],
+            "property_type": analysis.get("property_type"),
+            "bedrooms": analysis.get("bedrooms"),
+            "bathrooms": analysis.get("bathrooms"),
+            "square_footage": analysis.get("square_footage"),
+            "year_built": analysis.get("year_built"),
+            "fair_value": analysis["fair_value"],
+            "estimated_monthly_rent": analysis["estimated_monthly_rent"],
+            "discount_percent": analysis["discount_percent"],
+            "gross_rent_yield": analysis["gross_rent_yield"],
+            "deal_score": analysis["deal_score"],
+            "forecast_score": analysis["forecast_score"],
+            "forecast_outlook": analysis["forecast_outlook"],
+            "neighborhood_score": analysis["neighborhood_score"],
+            "neighborhood_grade": analysis["neighborhood_grade"],
+            "expected_appreciation": analysis["expected_appreciation"],
+            "confidence_score": analysis["confidence_score"],
+            "overall_score": analysis["overall_score"],
+            "status": analysis["status"],
+            "estimated_monthly_cash_flow":
+                analysis["estimated_monthly_cash_flow"],
+            "cache_status":
+                analysis.get("cache_status", "unknown"),
+        }
 
     for listing in listings:
         try:
@@ -1903,7 +1933,10 @@ def find_deals(
             )
 
             cache_lookup_ms = round(
-                (time.perf_counter() - cache_started_at) * 1000,
+                (
+                    time.perf_counter()
+                    - cache_started_at
+                ) * 1000,
                 2,
             )
 
@@ -1914,87 +1947,149 @@ def find_deals(
                     "[FIND_DEALS_PROPERTY_CACHE_HIT]",
                     {
                         "address": address,
-                        "cache_lookup_ms": cache_lookup_ms,
+                        "cache_lookup_ms":
+                            cache_lookup_ms,
                     },
                     flush=True,
                 )
 
-            else:
-                if (
-                    new_analysis_count >=
-                    max_new_analyses
-                ):
-                    continue
-
-                analysis_started_at = time.perf_counter()
-
-                analysis = analyze_single_property_uncached(
-                    address,
-                    listing_price,
+                deals.append(
+                    build_deal_payload(analysis)
                 )
 
-                analysis_ms = round(
-                    (time.perf_counter() - analysis_started_at) * 1000,
-                    2,
-                )
+                continue
 
-                print(
-                    "[FIND_DEALS_PROPERTY_ANALYSIS]",
-                    {
-                        "address": address,
-                        "analysis_ms": analysis_ms,
-                        "cache_lookup_ms": cache_lookup_ms,
-                    },
-                    flush=True,
-                )
+            if (
+                len(analysis_candidates)
+                >= max_new_analyses
+            ):
+                continue
 
-                save_cached_property(
-                    cache_key,
-                    address,
-                    listing_price,
-                    analysis,
-                )
-
-                new_analysis_count += 1
-
-            deals.append({
-                "address": analysis["address"],
-                "listing_price": analysis["listing_price"],
-                "property_type": analysis.get("property_type"),
-                "bedrooms": analysis.get("bedrooms"),
-                "bathrooms": analysis.get("bathrooms"),
-                "square_footage": analysis.get("square_footage"),
-                "year_built": analysis.get("year_built"),
-                "fair_value": analysis["fair_value"],
-                "estimated_monthly_rent": analysis["estimated_monthly_rent"],
-                "discount_percent": analysis["discount_percent"],
-                "gross_rent_yield": analysis["gross_rent_yield"],
-                "deal_score": analysis["deal_score"],
-                "forecast_score": analysis["forecast_score"],
-                "forecast_outlook": analysis["forecast_outlook"],
-                "neighborhood_score": analysis["neighborhood_score"],
-                "neighborhood_grade": analysis["neighborhood_grade"],
-                "expected_appreciation": analysis["expected_appreciation"],
-                "confidence_score": analysis["confidence_score"],
-                "overall_score": analysis["overall_score"],
-                "status": analysis["status"],
-                "estimated_monthly_cash_flow": analysis["estimated_monthly_cash_flow"],
-                "cache_status": analysis.get("cache_status", "unknown"),
-            })
+            analysis_candidates.append(
+                {
+                    "address": address,
+                    "listing_price":
+                        listing_price,
+                    "cache_key": cache_key,
+                    "cache_lookup_ms":
+                        cache_lookup_ms,
+                }
+            )
 
         except Exception as error:
             print(
                 "[FIND_DEALS_ANALYSIS_FAILED]",
                 {
-                    "address": listing.get("formattedAddress"),
-                    "price": listing.get("price"),
-                    "error_type": type(error).__name__,
-                    "error": str(error),
+                    "address":
+                        listing.get(
+                            "formattedAddress"
+                        ),
+                    "price":
+                        listing.get("price"),
+                    "error_type":
+                        type(error).__name__,
+                    "error":
+                        str(error),
                 },
                 flush=True,
             )
-            continue
 
+    def analyze_find_deals_candidate(candidate):
+        address = candidate["address"]
+
+        try:
+            analysis_started_at = (
+                time.perf_counter()
+            )
+
+            analysis = (
+                analyze_single_property_uncached(
+                    address,
+                    candidate["listing_price"],
+                )
+            )
+
+            analysis_ms = round(
+                (
+                    time.perf_counter()
+                    - analysis_started_at
+                ) * 1000,
+                2,
+            )
+
+            save_cached_property(
+                candidate["cache_key"],
+                address,
+                candidate["listing_price"],
+                analysis,
+            )
+
+            return {
+                "ok": True,
+                "analysis": analysis,
+                "analysis_ms": analysis_ms,
+                "cache_lookup_ms":
+                    candidate["cache_lookup_ms"],
+                "address": address,
+            }
+
+        except Exception as error:
+            return {
+                "ok": False,
+                "address": address,
+                "price":
+                    candidate["listing_price"],
+                "error_type":
+                    type(error).__name__,
+                "error": str(error),
+            }
+
+    if analysis_candidates:
+        with ThreadPoolExecutor(
+            max_workers=2
+        ) as executor:
+            analysis_results = list(
+                executor.map(
+                    analyze_find_deals_candidate,
+                    analysis_candidates,
+                )
+            )
+
+        for item in analysis_results:
+            if not item["ok"]:
+                print(
+                    "[FIND_DEALS_ANALYSIS_FAILED]",
+                    {
+                        "address": item["address"],
+                        "price": item["price"],
+                        "error_type":
+                            item["error_type"],
+                        "error": item["error"],
+                    },
+                    flush=True,
+                )
+
+                continue
+
+            print(
+                "[FIND_DEALS_PROPERTY_ANALYSIS]",
+                {
+                    "address": item["address"],
+                    "analysis_ms":
+                        item["analysis_ms"],
+                    "cache_lookup_ms":
+                        item["cache_lookup_ms"],
+                },
+                flush=True,
+            )
+
+            deals.append(
+                build_deal_payload(
+                    item["analysis"]
+                )
+            )
+
+            new_analysis_count += 1
     total_ms = round(
         (time.perf_counter() - request_started_at) * 1000,
         2,
