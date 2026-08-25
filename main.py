@@ -1,4 +1,5 @@
 import os
+import time
 import re
 from datetime import datetime, timezone
 import requests
@@ -1754,6 +1755,8 @@ def find_deals(
     request: FindDealsRequest,
     x_nestrova_internal_key: str | None = Header(default=None),
 ):
+    request_started_at = time.perf_counter()
+
     verify_internal_request(x_nestrova_internal_key)
 
     city = request.city.strip().title()
@@ -1800,6 +1803,8 @@ def find_deals(
         max_new_analyses = 2
         plan = "free"
 
+    rentcast_started_at = time.perf_counter()
+
     listings_response = requests.get(
         "https://api.rentcast.io/v1/listings/sale",
         headers=headers,
@@ -1817,6 +1822,11 @@ def find_deals(
 
     listings = listings_response.json()
 
+
+    rentcast_ms = round(
+        (time.perf_counter() - rentcast_started_at) * 1000,
+        2,
+    )
     print(
         "[FIND_DEALS_RENTCAST]",
         {
@@ -1825,6 +1835,7 @@ def find_deals(
             "max_price": max_price,
             "status": listings_response.status_code,
             "listing_count": len(listings),
+            "rentcast_ms": rentcast_ms,
         },
         flush=True,
     )
@@ -1885,12 +1896,28 @@ def find_deals(
                 listing_price,
             )
 
+            cache_started_at = time.perf_counter()
+
             analysis = get_cached_property(
                 cache_key,
             )
 
+            cache_lookup_ms = round(
+                (time.perf_counter() - cache_started_at) * 1000,
+                2,
+            )
+
             if analysis:
                 cache_hit_count += 1
+
+                print(
+                    "[FIND_DEALS_PROPERTY_CACHE_HIT]",
+                    {
+                        "address": address,
+                        "cache_lookup_ms": cache_lookup_ms,
+                    },
+                    flush=True,
+                )
 
             else:
                 if (
@@ -1899,9 +1926,26 @@ def find_deals(
                 ):
                     continue
 
+                analysis_started_at = time.perf_counter()
+
                 analysis = analyze_single_property_uncached(
                     address,
                     listing_price,
+                )
+
+                analysis_ms = round(
+                    (time.perf_counter() - analysis_started_at) * 1000,
+                    2,
+                )
+
+                print(
+                    "[FIND_DEALS_PROPERTY_ANALYSIS]",
+                    {
+                        "address": address,
+                        "analysis_ms": analysis_ms,
+                        "cache_lookup_ms": cache_lookup_ms,
+                    },
+                    flush=True,
                 )
 
                 save_cached_property(
@@ -1951,6 +1995,11 @@ def find_deals(
             )
             continue
 
+    total_ms = round(
+        (time.perf_counter() - request_started_at) * 1000,
+        2,
+    )
+
     print(
         "[FIND_DEALS_SUMMARY]",
         {
@@ -1958,6 +2007,7 @@ def find_deals(
             "successful_deals": len(deals),
             "new_analysis_count": new_analysis_count,
             "cache_hit_count": cache_hit_count,
+            "total_ms": total_ms,
         },
         flush=True,
     )
