@@ -212,7 +212,7 @@ def get_cached_find_deals(
             params={
                 "user_id": f"eq.{user_id}",
                 "search_key": f"eq.{search_key}",
-                "select": "result",
+                "select": "result,updated_at",
                 "limit": "1",
             },
             timeout=10,
@@ -227,8 +227,40 @@ def get_cached_find_deals(
             return None
 
         result = rows[0].get("result")
+        updated_at = rows[0].get("updated_at")
 
         if not isinstance(result, dict):
+            return None
+
+        if not updated_at:
+            return None
+
+        try:
+            cached_at = datetime.fromisoformat(
+                str(updated_at).replace("Z", "+00:00")
+            )
+
+            if cached_at.tzinfo is None:
+                cached_at = cached_at.replace(
+                    tzinfo=timezone.utc
+                )
+
+            cache_age_seconds = (
+                datetime.now(timezone.utc) - cached_at
+            ).total_seconds()
+
+            if cache_age_seconds > 1800:
+                return None
+
+        except Exception:
+            return None
+
+        cached_deals = result.get("deals")
+
+        if not isinstance(cached_deals, list):
+            return None
+
+        if len(cached_deals) == 0:
             return None
 
         result = dict(result)
@@ -258,6 +290,14 @@ def save_cached_find_deals(
         return
 
     try:
+        deals = result.get("deals")
+
+        if not isinstance(deals, list):
+            return
+
+        if len(deals) == 0:
+            return
+
         result_to_store = dict(result)
         result_to_store["search_cache_status"] = "stored"
 
@@ -366,7 +406,7 @@ def get_cached_property(cache_key):
             headers=get_supabase_headers(),
             params={
                 "cache_key": f"eq.{cache_key}",
-                "select": "result",
+                "select": "result,updated_at",
                 "limit": "1",
             },
             timeout=10,
