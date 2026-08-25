@@ -1882,6 +1882,8 @@ def find_deals(
     cache_hit_count = 0
     analysis_candidates = []
 
+    cache_prep_started_at = time.perf_counter()
+
     def build_deal_payload(analysis):
         return {
             "address": analysis["address"],
@@ -1994,6 +1996,26 @@ def find_deals(
                 flush=True,
             )
 
+    cache_prep_ms = round(
+        (
+            time.perf_counter()
+            - cache_prep_started_at
+        ) * 1000,
+        2,
+    )
+
+    print(
+        "[FIND_DEALS_CACHE_PREP]",
+        {
+            "listing_count": len(listings),
+            "analysis_candidate_count":
+                len(analysis_candidates),
+            "cache_hit_count": cache_hit_count,
+            "cache_prep_ms": cache_prep_ms,
+        },
+        flush=True,
+    )
+
     def analyze_find_deals_candidate(candidate):
         address = candidate["address"]
 
@@ -2044,6 +2066,8 @@ def find_deals(
                 "error": str(error),
             }
 
+    parallel_started_at = time.perf_counter()
+
     if analysis_candidates:
         with ThreadPoolExecutor(
             max_workers=2
@@ -2090,6 +2114,27 @@ def find_deals(
             )
 
             new_analysis_count += 1
+
+    parallel_ms = round(
+        (
+            time.perf_counter()
+            - parallel_started_at
+        ) * 1000,
+        2,
+    )
+
+    print(
+        "[FIND_DEALS_PARALLEL]",
+        {
+            "candidate_count":
+                len(analysis_candidates),
+            "new_analysis_count":
+                new_analysis_count,
+            "parallel_ms": parallel_ms,
+        },
+        flush=True,
+    )
+
     total_ms = round(
         (time.perf_counter() - request_started_at) * 1000,
         2,
