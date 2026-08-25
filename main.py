@@ -1912,6 +1912,8 @@ def find_deals(
                 analysis.get("cache_status", "unknown"),
         }
 
+    cache_lookup_candidates = []
+
     for listing in listings:
         try:
             address = listing.get("formattedAddress")
@@ -1923,58 +1925,14 @@ def find_deals(
             if listing_price > max_price:
                 continue
 
-            cache_key = make_cache_key(
-                address,
-                listing_price,
-            )
-
-            cache_started_at = time.perf_counter()
-
-            analysis = get_cached_property(
-                cache_key,
-            )
-
-            cache_lookup_ms = round(
-                (
-                    time.perf_counter()
-                    - cache_started_at
-                ) * 1000,
-                2,
-            )
-
-            if analysis:
-                cache_hit_count += 1
-
-                print(
-                    "[FIND_DEALS_PROPERTY_CACHE_HIT]",
-                    {
-                        "address": address,
-                        "cache_lookup_ms":
-                            cache_lookup_ms,
-                    },
-                    flush=True,
-                )
-
-                deals.append(
-                    build_deal_payload(analysis)
-                )
-
-                continue
-
-            if (
-                len(analysis_candidates)
-                >= max_new_analyses
-            ):
-                continue
-
-            analysis_candidates.append(
+            cache_lookup_candidates.append(
                 {
                     "address": address,
-                    "listing_price":
+                    "listing_price": listing_price,
+                    "cache_key": make_cache_key(
+                        address,
                         listing_price,
-                    "cache_key": cache_key,
-                    "cache_lookup_ms":
-                        cache_lookup_ms,
+                    ),
                 }
             )
 
@@ -1983,9 +1941,7 @@ def find_deals(
                 "[FIND_DEALS_ANALYSIS_FAILED]",
                 {
                     "address":
-                        listing.get(
-                            "formattedAddress"
-                        ),
+                        listing.get("formattedAddress"),
                     "price":
                         listing.get("price"),
                     "error_type":
@@ -1996,6 +1952,79 @@ def find_deals(
                 flush=True,
             )
 
+    def lookup_find_deals_cache(candidate):
+        cache_started_at = time.perf_counter()
+
+        analysis = get_cached_property(
+            candidate["cache_key"],
+        )
+
+        cache_lookup_ms = round(
+            (
+                time.perf_counter()
+                - cache_started_at
+            ) * 1000,
+            2,
+        )
+
+        return {
+            **candidate,
+            "analysis": analysis,
+            "cache_lookup_ms": cache_lookup_ms,
+        }
+
+    cache_lookup_results = []
+
+    if cache_lookup_candidates:
+        with ThreadPoolExecutor(
+            max_workers=4
+        ) as executor:
+            cache_lookup_results = list(
+                executor.map(
+                    lookup_find_deals_cache,
+                    cache_lookup_candidates,
+                )
+            )
+
+    for item in cache_lookup_results:
+        analysis = item["analysis"]
+
+        if analysis:
+            cache_hit_count += 1
+
+            print(
+                "[FIND_DEALS_PROPERTY_CACHE_HIT]",
+                {
+                    "address": item["address"],
+                    "cache_lookup_ms":
+                        item["cache_lookup_ms"],
+                },
+                flush=True,
+            )
+
+            deals.append(
+                build_deal_payload(analysis)
+            )
+
+            continue
+
+        if (
+            len(analysis_candidates)
+            >= max_new_analyses
+        ):
+            continue
+
+        analysis_candidates.append(
+            {
+                "address": item["address"],
+                "listing_price":
+                    item["listing_price"],
+                "cache_key":
+                    item["cache_key"],
+                "cache_lookup_ms":
+                    item["cache_lookup_ms"],
+            }
+        )
     cache_prep_ms = round(
         (
             time.perf_counter()
