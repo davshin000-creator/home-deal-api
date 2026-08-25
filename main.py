@@ -1811,6 +1811,18 @@ def find_deals(
 
     listings = listings_response.json()
 
+    print(
+        "[FIND_DEALS_RENTCAST]",
+        {
+            "city": city,
+            "state": state,
+            "max_price": max_price,
+            "status": listings_response.status_code,
+            "listing_count": len(listings),
+        },
+        flush=True,
+    )
+
     eligible_listings = []
 
     for listing in listings:
@@ -1838,6 +1850,14 @@ def find_deals(
         item["listing"]
         for item in eligible_listings
     ]
+
+    print(
+        "[FIND_DEALS_ELIGIBLE]",
+        {
+            "eligible_count": len(listings),
+        },
+        flush=True,
+    )
 
     deals = []
     new_analysis_count = 0
@@ -1912,8 +1932,29 @@ def find_deals(
                 "cache_status": analysis.get("cache_status", "unknown"),
             })
 
-        except Exception:
+        except Exception as error:
+            print(
+                "[FIND_DEALS_ANALYSIS_FAILED]",
+                {
+                    "address": listing.get("formattedAddress"),
+                    "price": listing.get("price"),
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                },
+                flush=True,
+            )
             continue
+
+    print(
+        "[FIND_DEALS_SUMMARY]",
+        {
+            "eligible_count": len(listings),
+            "successful_deals": len(deals),
+            "new_analysis_count": new_analysis_count,
+            "cache_hit_count": cache_hit_count,
+        },
+        flush=True,
+    )
 
     deals = sorted(deals, key=lambda item: item["overall_score"], reverse=True)
 
