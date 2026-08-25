@@ -351,11 +351,57 @@ def get_property_market_data(address):
             "cache_status": "hit",
         }
 
-    value_response = requests.get(
-        "https://api.rentcast.io/v1/avm/value",
-        headers=headers,
-        params={"address": address},
-        timeout=15,
+    def fetch_value_data():
+        return requests.get(
+            "https://api.rentcast.io/v1/avm/value",
+            headers=headers,
+            params={"address": address},
+            timeout=15,
+        )
+
+    def fetch_rent_data():
+        return requests.get(
+            "https://api.rentcast.io/v1/avm/rent/long-term",
+            headers=headers,
+            params={"address": address},
+            timeout=15,
+        )
+
+    market_data_started_at = time.perf_counter()
+
+    with ThreadPoolExecutor(
+        max_workers=2
+    ) as executor:
+        value_future = executor.submit(
+            fetch_value_data
+        )
+
+        rent_future = executor.submit(
+            fetch_rent_data
+        )
+
+        value_response = value_future.result()
+        rent_response = rent_future.result()
+
+    market_data_ms = round(
+        (
+            time.perf_counter()
+            - market_data_started_at
+        ) * 1000,
+        2,
+    )
+
+    print(
+        "[PROPERTY_MARKET_DATA_PARALLEL]",
+        {
+            "address": address,
+            "market_data_ms": market_data_ms,
+            "value_status":
+                value_response.status_code,
+            "rent_status":
+                rent_response.status_code,
+        },
+        flush=True,
     )
 
     if value_response.status_code != 200:
@@ -365,15 +411,6 @@ def get_property_market_data(address):
                 "Could not get fair value data for this address.",
         )
 
-    value_data = value_response.json()
-
-    rent_response = requests.get(
-        "https://api.rentcast.io/v1/avm/rent/long-term",
-        headers=headers,
-        params={"address": address},
-        timeout=15,
-    )
-
     if rent_response.status_code != 200:
         raise HTTPException(
             status_code=400,
@@ -381,8 +418,8 @@ def get_property_market_data(address):
                 "Could not get rent estimate data for this address.",
         )
 
+    value_data = value_response.json()
     rent_data = rent_response.json()
-
     payload = {
         "value_data": value_data,
         "rent_data": rent_data,
