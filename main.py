@@ -1550,7 +1550,13 @@ def get_month_key():
     return f"{now.year}-{str(now.month).zfill(2)}"
 
 
-def get_usage_limit(action, is_pro):
+DEVELOPER_USER_IDS = {
+    "d975af77-a678-4e08-b227-c1477f31783d",
+}
+
+def get_usage_limit(action, is_pro, user_id=None):
+    if user_id in DEVELOPER_USER_IDS:
+        return 999999
     if action == "analyze":
         return PRO_ANALYZE_MONTHLY_LIMIT if is_pro else FREE_ANALYZE_MONTHLY_LIMIT
 
@@ -1617,7 +1623,7 @@ def enforce_usage_limit(user_id, action, is_pro):
         }
 
     counts = get_usage_counts(user_id)
-    limit = get_usage_limit(action, is_pro)
+    limit = get_usage_limit(action, is_pro, user_id)
 
     current_count = (
         counts["analyze_count"]
