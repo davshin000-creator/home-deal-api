@@ -467,6 +467,93 @@ def get_cached_property(cache_key):
         return None
 
 
+def get_cached_properties(cache_keys):
+    if (
+        not cache_keys
+        or not SUPABASE_URL
+        or not SUPABASE_SERVICE_ROLE_KEY
+    ):
+        return {}
+
+    try:
+        unique_keys = list(dict.fromkeys(cache_keys))
+
+        quoted_keys = []
+
+        for cache_key in unique_keys:
+            safe_key = (
+                str(cache_key)
+                .replace("\\", "\\\\")
+                .replace('"', '\\"')
+            )
+
+            quoted_keys.append(
+                f'"{safe_key}"'
+            )
+
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/property_cache",
+            headers=get_supabase_headers(),
+            params={
+                "cache_key":
+                    f"in.({','.join(quoted_keys)})",
+                "select":
+                    "cache_key,result,updated_at",
+            },
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            print(
+                "[PROPERTY_CACHE_BATCH_FAILED]",
+                {
+                    "status":
+                        response.status_code,
+                    "key_count":
+                        len(unique_keys),
+                    "error":
+                        response.text[:500],
+                },
+                flush=True,
+            )
+
+            return {}
+
+        rows = response.json()
+
+        cached_results = {}
+
+        for row in rows:
+            cache_key = row.get("cache_key")
+            result = row.get("result")
+
+            if (
+                not cache_key
+                or not isinstance(result, dict)
+            ):
+                continue
+
+            result = dict(result)
+            result["cache_status"] = "hit"
+
+            cached_results[cache_key] = result
+
+        return cached_results
+
+    except Exception as error:
+        print(
+            "[PROPERTY_CACHE_BATCH_FAILED]",
+            {
+                "error_type":
+                    type(error).__name__,
+                "error":
+                    str(error),
+            },
+            flush=True,
+        )
+
+        return {}
+
 def save_cached_property(cache_key, address, listing_price, result):
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return
@@ -1989,42 +2076,40 @@ def find_deals(
                 flush=True,
             )
 
-    def lookup_find_deals_cache(candidate):
-        cache_started_at = time.perf_counter()
+    batch_cache_started_at = time.perf_counter()
 
-        analysis = get_cached_property(
-            candidate["cache_key"],
+    cached_properties = get_cached_properties(
+        [
+            item["cache_key"]
+            for item in cache_lookup_candidates
+        ]
+    )
+
+    batch_cache_ms = round(
+        (
+            time.perf_counter()
+            - batch_cache_started_at
+        ) * 1000,
+        2,
+    )
+
+    print(
+        "[FIND_DEALS_BATCH_CACHE]",
+        {
+            "candidate_count":
+                len(cache_lookup_candidates),
+            "cache_hit_count":
+                len(cached_properties),
+            "batch_cache_ms":
+                batch_cache_ms,
+        },
+        flush=True,
+    )
+
+    for item in cache_lookup_candidates:
+        analysis = cached_properties.get(
+            item["cache_key"]
         )
-
-        cache_lookup_ms = round(
-            (
-                time.perf_counter()
-                - cache_started_at
-            ) * 1000,
-            2,
-        )
-
-        return {
-            **candidate,
-            "analysis": analysis,
-            "cache_lookup_ms": cache_lookup_ms,
-        }
-
-    cache_lookup_results = []
-
-    if cache_lookup_candidates:
-        with ThreadPoolExecutor(
-            max_workers=4
-        ) as executor:
-            cache_lookup_results = list(
-                executor.map(
-                    lookup_find_deals_cache,
-                    cache_lookup_candidates,
-                )
-            )
-
-    for item in cache_lookup_results:
-        analysis = item["analysis"]
 
         if analysis:
             cache_hit_count += 1
@@ -2034,7 +2119,7 @@ def find_deals(
                 {
                     "address": item["address"],
                     "cache_lookup_ms":
-                        item["cache_lookup_ms"],
+                        batch_cache_ms,
                 },
                 flush=True,
             )
@@ -2059,7 +2144,7 @@ def find_deals(
                 "cache_key":
                     item["cache_key"],
                 "cache_lookup_ms":
-                    item["cache_lookup_ms"],
+                    batch_cache_ms,
             }
         )
     cache_prep_ms = round(
