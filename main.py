@@ -498,7 +498,7 @@ def get_cached_properties(cache_keys):
                 "cache_key":
                     f"in.({','.join(quoted_keys)})",
                 "select":
-                    "cache_key,result,updated_at",
+                    "cache_key,result,created_at",
             },
             timeout=10,
         )
