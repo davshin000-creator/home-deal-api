@@ -188,7 +188,7 @@ def make_find_deals_cache_key(
     )
 
     return (
-        f"find_deals|"
+        f"find_deals_v2|"
         f"{normalized_city}|"
         f"{normalized_state}|"
         f"{int(float(max_price))}|"
@@ -2040,7 +2040,38 @@ def find_deals(
 
     for listing in listings:
         try:
-            address = listing.get("formattedAddress")
+            address_parts = [
+                listing.get("addressLine1"),
+                listing.get("addressLine2"),
+            ]
+            street_address = ", ".join(
+                str(part).strip()
+                for part in address_parts
+                if part and str(part).strip()
+            )
+
+            city_value = str(listing.get("city") or "").strip()
+            state_value = str(listing.get("state") or "").strip()
+            zip_value = str(listing.get("zipCode") or "").strip()
+
+            city_state_zip = ", ".join(
+                part
+                for part in [
+                    city_value,
+                    " ".join(
+                        part
+                        for part in [state_value, zip_value]
+                        if part
+                    ),
+                ]
+                if part
+            )
+
+            address = ", ".join(
+                part
+                for part in [street_address, city_state_zip]
+                if part
+            ) or listing.get("formattedAddress")
             listing_price = listing.get("price")
 
             if not address or not listing_price:
